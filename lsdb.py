@@ -1,7 +1,9 @@
 import abc
+import asyncio
 import datetime
 import ipaddress
 import json
+import logging
 import math
 import struct
 import sys
@@ -95,6 +97,8 @@ JSONDIFF_TO_HUMAN = {
     jd.discard: "remove",
     jd.add: "add",
 }
+
+POST_DELETE_LSA_TTL = datetime.timedelta(seconds=10)
 
 
 def addr_and_mask_to_cidr(addr: int, mask: int) -> str:
@@ -222,8 +226,19 @@ class LSA(abc.ABC):
             # "ls_len": self.ls_len,
         }
 
-    def diff_dict(self, other: "LSA") -> Dict[str, Any]:
-        pass
+    def diff_list(
+        self, old: Optional["LSA"], new: Optional["LSA"]
+    ) -> List[Dict[str, Any]]:
+        if new and old and new.ls_type != new.ls_type:
+            raise ValueError(
+                f"Cannot check diff between {new} and {old} as they are different LSA types"
+            )
+
+        return self._diff_list(old, new)
+
+    @staticmethod
+    def _diff_list(old: Optional["LSA"], new: Optional["LSA"]) -> List[Dict[str, Any]]:
+        raise NotImplementedError("Subclasses must implement this function")
 
     def to_dict(self) -> Dict[str, Any]:
         raise NotImplementedError("Subclasses must implement this function")
@@ -341,6 +356,52 @@ class RouterLSA(LSA):
 
         return links_json
 
+    @staticmethod
+    def _diff_list(
+        old: Optional["RouterLSA"], new: Optional["RouterLSA"]
+    ) -> List[Dict[str, Any]]:
+        try:
+            old_routes: Dict[str, set] = old.to_dict() if old else {}
+            new_routes: Dict[str, set] = new.to_dict() if new else {}
+        except ValueError:
+            # LSDB not yet filled case for network links
+            return []
+
+        output = []
+
+        route_types = set(old_routes.keys()) | set(new_routes.keys())
+        for route_type in route_types:
+            if route_type not in old_routes:
+                old_routes[route_type] = set()
+            if route_type not in new_routes:
+                new_routes[route_type] = set()
+
+        lsa = new if new else old
+
+        for route_type in route_types:
+            old_links = old_routes[route_type]
+            new_links = new_routes[route_type]
+
+            removed_links = old_links - new_links
+            added_links = new_links - old_links
+
+            changes = {("removed", link) for link in removed_links} | {
+                ("added", link) for link in added_links
+            }
+
+            for change_verb, content in changes:
+                output.append(
+                    {
+                        "entity": {
+                            "type": "router",
+                            "id": lsa.internal_entity_id,
+                        },
+                        change_verb: ({"link": {route_type: content}}),
+                    }
+                )
+
+        return output
+
 
 class NetworkLSA(LSA):
     @dataclass
@@ -388,6 +449,36 @@ class NetworkLSA(LSA):
             "routers": {router.id__as_ip for router in self.routers},
         }
 
+    @staticmethod
+    def _diff_list(
+        old: Optional["NetworkLSA"], new: Optional["NetworkLSA"]
+    ) -> List[Dict[str, Any]]:
+        old_routers: set = old.to_dict()["routers"] if old else set()
+        new_routers: set = new.to_dict()["routers"] if new else set()
+
+        output = []
+
+        removed_routers = old_routers - new_routers
+        added_routers = new_routers - old_routers
+
+        changes = {("removed", router) for router in removed_routers} | {
+            ("added", router) for router in added_routers
+        }
+
+        lsa = new if new else old
+        for change_verb, content in changes:
+            output.append(
+                {
+                    "entity": {
+                        "type": "network",
+                        "id": lsa.network_cidr,
+                    },
+                    change_verb: ({"router": content}),
+                }
+            )
+
+        return output
+
 
 class ASExternalLSA(LSA):
 
@@ -418,6 +509,26 @@ class ASExternalLSA(LSA):
 
         return route
 
+    @staticmethod
+    def _diff_list(
+        old: Optional["ASExternalLSA"], new: Optional["ASExternalLSA"]
+    ) -> List[Dict[str, Any]]:
+        if new and old:
+            return []
+
+        lsa = new if new else old
+        verb = "added" if new else "removed"
+
+        return [
+            {
+                "entity": {
+                    "type": "router",
+                    "id": lsa.internal_entity_id,
+                },
+                verb: {"link": {"external": lsa.to_dict()}},
+            }
+        ]
+
 
 def hexdump(data: bytes):
     def to_printable_ascii(byte):
@@ -434,15 +545,63 @@ def hexdump(data: bytes):
 
 class LSDB:
     def __init__(self):
-        self.lsa_dict: Dict[Tuple[int, int, int], Tuple[LSA, datetime.datetime]] = {}
+        self.lsa_dict: Dict[
+            Tuple[int, int, int], Tuple[LSA, datetime.datetime, bool]
+        ] = {}
+        self.expiring_queue = []
 
-    def get_lsa(self, lsa: LSA) -> Tuple[LSA, datetime.datetime]:
-        return self.lsa_dict.get(lsa.identifier_tuple)
+        asyncio.create_task(self._clear_expired_items())
+
+    async def _clear_expired_items(self):
+        try:
+            while True:
+                while len(self.expiring_queue):
+                    expiry_time, lsa = self.expiring_queue[0]
+                    if expiry_time < datetime.datetime.now(tz=datetime.timezone.utc):
+                        self.expiring_queue.pop(0)
+                        if (
+                            lsa.identifier_tuple in self.lsa_dict
+                            and self.lsa_dict[lsa.identifier_tuple][2]
+                        ):
+                            del self.lsa_dict[lsa.identifier_tuple]
+                            # Print delete message
+                            diff_list = lsa.diff_list(lsa, None)
+                            for item in diff_list:
+                                print(json.dumps(item))
+                    else:
+                        # The list is guaranteed to be ordered, no need to scan
+                        # through all the items that aren't ready yet
+                        break
+
+                await asyncio.sleep(1)
+        except Exception:
+            logging.exception("Exception while clearing expired items")
+            return 98
+
+    def get_lsa(self, lsa: LSA) -> Tuple[LSA, datetime.datetime, bool]:
+        result = self.lsa_dict.get(lsa.identifier_tuple)
+        return result if result else (None, None, None)
+
+    def delete_lsa(self, lsa: LSA) -> None:
+        if lsa.identifier_tuple in self.lsa_dict:
+            if self.lsa_dict[lsa.identifier_tuple][2]:
+                delete_recv_time = self.lsa_dict[lsa.identifier_tuple][1]
+            else:
+                delete_recv_time = datetime.datetime.now(tz=datetime.timezone.utc)
+
+            self.lsa_dict[lsa.identifier_tuple] = (
+                self.lsa_dict[lsa.identifier_tuple][0],
+                delete_recv_time,
+                True,
+            )
+
+            self.expiring_queue.append((delete_recv_time + POST_DELETE_LSA_TTL, lsa))
 
     def put_lsa(self, lsa: LSA) -> None:
         self.lsa_dict[lsa.identifier_tuple] = (
             lsa,
             datetime.datetime.now(tz=datetime.timezone.utc),
+            False,
         )
         lsa.attach_to_lsdb(self)
 
@@ -492,7 +651,7 @@ class LSDB:
         }
 
 
-global_ls_db = LSDB()
+global_ls_db: Optional[LSDB] = None
 
 
 def recv_lsa_callback(
@@ -503,66 +662,63 @@ def recv_lsa_callback(
     lsa_data: bytes,
     full_lsa_message: bytes,
 ):
+    global global_ls_db
+    if not global_ls_db:
+        global_ls_db = LSDB()
+
     assert area_id == 0
 
     lsa = LSA.construct_lsa(lsa_header, lsa_data)
 
-    existing_db_copy = global_ls_db.get_lsa(lsa)
+    existing_db_copy, last_write, delete_bit = global_ls_db.get_lsa(lsa)
+    # ttl_expired = (
+    #     delete_bit
+    #     and (datetime.datetime.now(tz=datetime.timezone.utc) - last_write)
+    #     > POST_DELETE_LSA_TTL
+    # )
 
     if msg_type == MSG_LSA_DELETE_NOTIFY and existing_db_copy:
-        # Disabled to allow diffs
-        # del global_ls_db[lsa_identifier_tuple]
-        return
-    else:
-        pass
+        global_ls_db.delete_lsa(lsa)
 
-    if lsa.ls_age == LSA_MAX_AGE and not existing_db_copy:
+        # # Disabled for router and network LSAs to allow diffs
+        # if lsa.ls_type == LSA_TYPE_AS_EXTERNAL:
+        #     global_ls_db.delete_lsa(lsa)
+        #     print(
+        #         json.dumps(
+        #             {
+        #                 "entity": {
+        #                     "type": "router",
+        #                     "id": lsa.internal_entity_id,
+        #                 },
+        #                 "remove": {"link": {"external": lsa.to_dict()}},
+        #             }
+        #         )
+        #     )
+        return
+
+    if lsa.ls_age == LSA_MAX_AGE and (not existing_db_copy or delete_bit):
         return  # Drop per RFC 2328 Section 13.0 (4)
 
-    if not existing_db_copy or existing_db_copy[0] < lsa:
+    if delete_bit or not existing_db_copy or existing_db_copy < lsa:
         if (
             existing_db_copy
-            and (datetime.datetime.now(tz=datetime.timezone.utc) - existing_db_copy[1])
+            and not delete_bit
+            and (datetime.datetime.now(tz=datetime.timezone.utc) - last_write)
             < MIN_LS_ARRIVAL
         ):
             return  # Drop per RFC 2328 Section 13.0 (5)(a)
 
         global_ls_db.put_lsa(lsa)
 
-        # On our first update, we know we have downloaded an entire copy of the LSDB,
-        # so we can print and exit
+        # if existing_db_copy and not ttl_expired:
         if existing_db_copy:
-            old_dict = existing_db_copy[0].to_dict()
-            new_dict = lsa.to_dict()
-            difference = diff(old_dict, new_dict)
-            # api_dict = global_ls_db.to_api_dict()
-            output = []
-
-            for route_type, changes in difference.items():
-                for change_type, values in changes.items():
-                    for value in values:
-                        output.append(
-                            {
-                                "entity": {
-                                    "type": (
-                                        "network"
-                                        if lsa.ls_type == LSA_TYPE_NETWORK
-                                        else "router"
-                                    ),
-                                    "id": lsa.internal_entity_id,
-                                },
-                                JSONDIFF_TO_HUMAN[change_type]: (
-                                    {"link": {route_type: value}}
-                                    if lsa.ls_type != LSA_TYPE_NETWORK
-                                    else {"router": value}
-                                ),
-                            }
-                        )
-
+            output = existing_db_copy.diff_list(existing_db_copy, lsa)
             for line in output:
                 print(json.dumps(line))
-            # print(json.dumps(api_dict, indent=2))
-            # sys.exit(0)
+        else:
+            output = lsa.diff_list(None, lsa)
+            for line in output:
+                print(json.dumps(line))
 
 
 from ospfclient import MSG_LSA_DELETE_NOTIFY
