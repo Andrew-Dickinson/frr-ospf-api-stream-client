@@ -1,7 +1,11 @@
 import abc
 import datetime
+import ipaddress
+import json
 import math
 import struct
+import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal, Tuple, Dict, Any, Callable, Optional, List, Union
@@ -84,6 +88,24 @@ LSA_FIELD_MAPPING_MODIFIER_FUNCS: Dict[str, Callable[[int], Any]] = {
 }
 
 
+def addr_and_mask_to_cidr(addr: int, mask: int) -> str:
+    if mask == 0:
+        prefix_len = 0
+    else:
+        mask_binary_string = bin(mask)
+        assert "b0" not in mask_binary_string
+        assert "01" not in mask_binary_string
+        assert len(mask_binary_string[2:]) == 32
+        prefix_len = mask_binary_string[2:].count("1")
+
+    assert prefix_len <= 32
+    assert prefix_len >= 0
+    network_addr_int = addr & mask
+    # network_addr_int = (addr >> prefix_len) << prefix_len
+    network_addr = ipaddress.ip_address(network_addr_int)
+    return f"{str(network_addr)}/{prefix_len}"
+
+
 class LSAException(Exception):
     pass
 
@@ -155,6 +177,10 @@ class LSA(abc.ABC):
             return self.ls_age < other.ls_age
 
         return False
+
+    @property
+    def identifier_tuple(self):
+        return self.ls_type, self.ls_id, self.ls_advertising_router
 
     @property
     def header_ext(self) -> Tuple:
@@ -352,7 +378,104 @@ def hexdump(data: bytes):
         offset += 4
 
 
-global_ls_db: Dict[Tuple[int, int, int], Tuple[LSA, datetime.datetime]] = {}
+class LSDB:
+    def __init__(self):
+        self.lsa_dict: Dict[Tuple[int, int, int], Tuple[LSA, datetime.datetime]] = {}
+
+    def get_lsa(self, lsa: LSA) -> Tuple[LSA, datetime.datetime]:
+        return self.lsa_dict.get(lsa.identifier_tuple)
+
+    def put_lsa(self, lsa: LSA) -> None:
+        self.lsa_dict[lsa.identifier_tuple] = (
+            lsa,
+            datetime.datetime.now(tz=datetime.timezone.utc),
+        )
+
+    @property
+    def dr_map(self):
+        dr_to_lsa_map = {}
+        for lsa, _ in self.lsa_dict.values():
+            if lsa.ls_type == LSA_TYPE_NETWORK:
+                # network_cidr = addr_and_mask_to_cidr(lsa.ls_id, lsa.network_mask)
+                # networks[network_cidr] = {
+                #     "dr": lsa.ls_advertising_router__as_ip,
+                #     "routers": [router.id__as_ip for router in lsa.routers],
+                # }
+                dr_to_lsa_map[lsa.ls_id__as_ip] = lsa
+
+        return dr_to_lsa_map
+
+    def to_api_dict(self) -> Dict[str, Any]:
+        dr_to_lsa_map = self.dr_map
+
+        networks = {}
+        routers = defaultdict(lambda: {"links": defaultdict(list)})
+
+        for lsa, _ in self.lsa_dict.values():
+            if lsa.ls_type == LSA_TYPE_NETWORK:
+                network_cidr = addr_and_mask_to_cidr(lsa.ls_id, lsa.network_mask)
+                networks[network_cidr] = {
+                    "dr": lsa.ls_advertising_router__as_ip,
+                    "routers": [router.id__as_ip for router in lsa.routers],
+                }
+                # dr_to_network_cidr_map[lsa.ls_id__as_ip] = network_cidr
+
+        for lsa, _ in self.lsa_dict.values():
+            if lsa.ls_type == LSA_TYPE_ROUTER:
+                for link in lsa.links:
+                    if link.type == 1:
+                        routers[lsa.ls_advertising_router__as_ip]["links"][
+                            "router"
+                        ].append({"id": link.id__as_ip, "metric": link.metric})
+                    elif link.type == 2:
+                        network_lsa = dr_to_lsa_map[link.id__as_ip]
+                        network_cidr = addr_and_mask_to_cidr(
+                            network_lsa.ls_id, network_lsa.network_mask
+                        )
+                        routers[lsa.ls_advertising_router__as_ip]["links"][
+                            "network"
+                        ].append(
+                            {
+                                "id": network_cidr,
+                                "metric": link.metric,
+                            }
+                        )
+                    elif link.type == 3:
+                        routers[lsa.ls_advertising_router__as_ip]["links"][
+                            "stubnet"
+                        ].append(
+                            {
+                                "id": addr_and_mask_to_cidr(link.id, link.data),
+                                "metric": link.metric,
+                            }
+                        )
+                    else:
+                        raise ValueError(
+                            f"Unsupported link type: {link.type} in {link} on {lsa}"
+                        )
+            elif lsa.ls_type == LSA_TYPE_AS_EXTERNAL:
+                route = {
+                    "id": addr_and_mask_to_cidr(lsa.ls_id, lsa.network_mask),
+                }
+                if lsa.is_type_2:
+                    route["metric2"] = lsa.metric
+                else:
+                    route["metric"] = lsa.metric
+
+                if lsa.forwarding_address:
+                    route["via"] = lsa.forwarding_address__as_ip
+
+                routers[lsa.ls_advertising_router__as_ip]["links"]["external"].append(
+                    route
+                )
+
+        return {
+            "areas": {"0.0.0.0": {"networks": networks, "routers": routers}},
+            "updated": int(datetime.datetime.now(tz=datetime.timezone.utc).timestamp()),
+        }
+
+
+global_ls_db = LSDB()
 
 
 def recv_lsa_callback(
@@ -366,9 +489,8 @@ def recv_lsa_callback(
     assert area_id == 0
 
     lsa = LSA.construct_lsa(lsa_header, lsa_data)
-    lsa_identifier_tuple = (lsa.ls_type, lsa.ls_id, lsa.ls_advertising_router)
 
-    existing_db_copy = global_ls_db.get(lsa_identifier_tuple)
+    existing_db_copy = global_ls_db.get_lsa(lsa)
 
     if msg_type == MSG_LSA_DELETE_NOTIFY and existing_db_copy:
         # Disabled to allow diffs
@@ -388,15 +510,16 @@ def recv_lsa_callback(
         ):
             return  # Drop per RFC 2328 Section 13.0 (5)(a)
 
+        # On our first update, we know we have downloaded an entire copy of the LSDB,
+        # so we can print and exit
         if existing_db_copy:
-            old_dict = existing_db_copy[0].to_dict()
-            new_dict = lsa.to_dict()
-            pass
+            # old_dict = existing_db_copy[0].to_dict()
+            # new_dict = lsa.to_dict()
+            api_dict = global_ls_db.to_api_dict()
+            print(json.dumps(api_dict, indent=2))
+            sys.exit(0)
 
-        global_ls_db[lsa_identifier_tuple] = (
-            lsa,
-            datetime.datetime.now(tz=datetime.timezone.utc),
-        )
+        global_ls_db.put_lsa(lsa)
 
 
 from ospfclient import MSG_LSA_DELETE_NOTIFY
