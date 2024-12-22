@@ -18,7 +18,7 @@ from asyncio import Event, Lock
 from functools import partial
 from ipaddress import ip_address as ip
 
-from lsdb import recv_lsa_callback, LSDB
+from lsdb import LSDB
 
 FMT_APIMSGHDR = ">BBHL"
 FMT_APIMSGHDR_SIZE = struct.calcsize(FMT_APIMSGHDR)
@@ -1127,7 +1127,7 @@ async def async_main(args):
             lsdb.initial_load_active = False
 
         logging.warning("Waiting for initial load to complete...")
-        await c.monitor_lsa(partial(recv_lsa_callback, lsdb=lsdb))
+        await c.monitor_lsa(lsdb.recv_lsa_callback)
 
         # We don't actually care about the router ID callback, but we use this to queue up an event
         # in the sync queue so that we know when the initial load has completed, and we can start

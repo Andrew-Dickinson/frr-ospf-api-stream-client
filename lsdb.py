@@ -646,50 +646,46 @@ class LSDB:
         if not self.initial_load_active:
             print(json.dumps(event))
 
+    def recv_lsa_callback(
+        self,
+        msg_type: int,
+        ifaddr: int,
+        area_id: int,
+        lsa_header: Tuple[int, int, int, int, int, int, int, int],
+        lsa_data: bytes,
+        full_lsa_message: bytes,
+    ):
+        assert area_id == 0
 
-def recv_lsa_callback(
-    msg_type: int,
-    ifaddr: int,
-    area_id: int,
-    lsa_header: Tuple[int, int, int, int, int, int, int, int],
-    lsa_data: bytes,
-    full_lsa_message: bytes,
-    lsdb: LSDB = None,
-):
-    if lsdb is None:
-        raise ValueError("Invalid input, LSDB cannot be None")
+        lsa = LSA.construct_lsa(lsa_header, lsa_data)
+        existing_db_copy, last_write, delete_bit = self.get_lsa(lsa)
 
-    assert area_id == 0
+        if msg_type == MSG_LSA_DELETE_NOTIFY and existing_db_copy:
+            self.delete_lsa(lsa)
+            return
 
-    lsa = LSA.construct_lsa(lsa_header, lsa_data)
-    existing_db_copy, last_write, delete_bit = lsdb.get_lsa(lsa)
+        if lsa.ls_age == LSA_MAX_AGE and (not existing_db_copy or delete_bit):
+            return  # Drop per RFC 2328 Section 13.0 (4)
 
-    if msg_type == MSG_LSA_DELETE_NOTIFY and existing_db_copy:
-        lsdb.delete_lsa(lsa)
-        return
+        if delete_bit or not existing_db_copy or existing_db_copy < lsa:
+            if (
+                existing_db_copy
+                and not delete_bit
+                and (datetime.datetime.now(tz=datetime.timezone.utc) - last_write)
+                < MIN_LS_ARRIVAL
+            ):
+                return  # Drop per RFC 2328 Section 13.0 (5)(a)
 
-    if lsa.ls_age == LSA_MAX_AGE and (not existing_db_copy or delete_bit):
-        return  # Drop per RFC 2328 Section 13.0 (4)
+            self.put_lsa(lsa)
 
-    if delete_bit or not existing_db_copy or existing_db_copy < lsa:
-        if (
-            existing_db_copy
-            and not delete_bit
-            and (datetime.datetime.now(tz=datetime.timezone.utc) - last_write)
-            < MIN_LS_ARRIVAL
-        ):
-            return  # Drop per RFC 2328 Section 13.0 (5)(a)
-
-        lsdb.put_lsa(lsa)
-
-        if existing_db_copy:
-            output = existing_db_copy.diff_list(existing_db_copy, lsa)
-            for line in output:
-                lsdb.publish_change_event(line)
-        else:
-            output = lsa.diff_list(None, lsa)
-            for line in output:
-                lsdb.publish_change_event(line)
+            if existing_db_copy:
+                output = existing_db_copy.diff_list(existing_db_copy, lsa)
+                for line in output:
+                    self.publish_change_event(line)
+            else:
+                output = lsa.diff_list(None, lsa)
+                for line in output:
+                    self.publish_change_event(line)
 
 
 from ospfclient import MSG_LSA_DELETE_NOTIFY
