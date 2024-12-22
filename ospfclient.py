@@ -1200,7 +1200,7 @@ def main(*args):
     )
     args = ap.parse_args()
 
-    level = logging.DEBUG if args.verbose else logging.INFO
+    level = logging.DEBUG if args.verbose else logging.WARNING
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(levelname)s: {}: %(name)s %(message)s".format(
