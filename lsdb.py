@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal, Tuple, Dict, Any, Callable, Optional, List, Union
 
+from frozendict import frozendict
+import jsondiff as jd
+from jsondiff import diff
+
 import netaddr
 
 MSG_TYPE = Literal["MSG_LSA_UPDATE_NOTIFY", "MSG_LSA_DELETE_NOTIFY"]
@@ -85,6 +89,11 @@ LSA_FIELD_MAPPING_MODIFIER_FUNCS: Dict[str, Callable[[int], Any]] = {
     None: lambda x: x,
     "as_ip": lambda x: str(netaddr.IPAddress(x)),
     # "as_bitflags": lambda x: [(x >> i) & 1 == 1 for i in range(7, -1, -1)],
+}
+
+JSONDIFF_TO_HUMAN = {
+    jd.discard: "remove",
+    jd.add: "add",
 }
 
 
@@ -213,13 +222,10 @@ class LSA(abc.ABC):
             # "ls_len": self.ls_len,
         }
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            # **self.header_dict(),
-            **self._to_dict(),
-        }
+    def diff_dict(self, other: "LSA") -> Dict[str, Any]:
+        pass
 
-    def _to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         raise NotImplementedError("Subclasses must implement this function")
 
     @classmethod
@@ -287,12 +293,12 @@ class RouterLSA(LSA):
 
         return links
 
-    def _to_dict(self) -> Dict[str, Any]:
-        links_json = defaultdict(list)
+    def to_dict(self) -> Dict[str, Any]:
+        links_json = defaultdict(set)
         for link in self.links:
             if link.type == 1:
-                links_json["router"].append(
-                    {"id": link.id__as_ip, "metric": link.metric}
+                links_json["router"].add(
+                    frozendict({"id": link.id__as_ip, "metric": link.metric})
                 )
             elif link.type == 2:
                 if not self.lsdb:
@@ -310,19 +316,23 @@ class RouterLSA(LSA):
                 network_cidr = addr_and_mask_to_cidr(
                     network_lsa.ls_id, network_lsa.network_mask
                 )
-                links_json["network"].append(
-                    {
-                        "id": network_cidr,
-                        # "id": link.id__as_ip,  ### WRONG
-                        "metric": link.metric,
-                    }
+                links_json["network"].add(
+                    frozendict(
+                        {
+                            "id": network_cidr,
+                            # "id": link.id__as_ip,  ### WRONG
+                            "metric": link.metric,
+                        }
+                    )
                 )
             elif link.type == 3:
-                links_json["stubnet"].append(
-                    {
-                        "id": addr_and_mask_to_cidr(link.id, link.data),
-                        "metric": link.metric,
-                    }
+                links_json["stubnet"].add(
+                    frozendict(
+                        {
+                            "id": addr_and_mask_to_cidr(link.id, link.data),
+                            "metric": link.metric,
+                        }
+                    )
                 )
             else:
                 raise ValueError(
@@ -372,10 +382,10 @@ class NetworkLSA(LSA):
     def network_cidr(self):
         return addr_and_mask_to_cidr(self.ls_id, self.network_mask)
 
-    def _to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "dr": self.ls_advertising_router__as_ip,
-            "routers": [router.id__as_ip for router in self.routers],
+            "routers": {router.id__as_ip for router in self.routers},
         }
 
 
@@ -394,7 +404,7 @@ class ASExternalLSA(LSA):
     def header_ext(self) -> Tuple:
         return struct.unpack(AS_EXTERNAL_HEADER_EXT, self.body[:16])
 
-    def _to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         route = {
             "id": addr_and_mask_to_cidr(self.ls_id, self.network_mask),
         }
@@ -462,7 +472,7 @@ class LSDB:
         dr_to_lsa_map = self.dr_map
 
         networks = {}
-        routers = defaultdict(lambda: {"links": defaultdict(list)})
+        routers = defaultdict(lambda: {"links": defaultdict(set)})
 
         for lsa, _ in self.lsa_dict.values():
             if lsa.ls_type == LSA_TYPE_NETWORK:
@@ -472,8 +482,8 @@ class LSDB:
             if lsa.ls_type == LSA_TYPE_ROUTER:
                 routers[lsa.internal_entity_id]["links"] |= lsa.to_dict()
             elif lsa.ls_type == LSA_TYPE_AS_EXTERNAL:
-                routers[lsa.internal_entity_id]["links"]["external"].append(
-                    lsa.to_dict()
+                routers[lsa.internal_entity_id]["links"]["external"].add(
+                    frozendict(lsa.to_dict())
                 )
 
         return {
@@ -517,16 +527,42 @@ def recv_lsa_callback(
         ):
             return  # Drop per RFC 2328 Section 13.0 (5)(a)
 
+        global_ls_db.put_lsa(lsa)
+
         # On our first update, we know we have downloaded an entire copy of the LSDB,
         # so we can print and exit
         if existing_db_copy:
-            # old_dict = existing_db_copy[0].to_dict()
-            # new_dict = lsa.to_dict()
-            api_dict = global_ls_db.to_api_dict()
-            print(json.dumps(api_dict, indent=2))
-            sys.exit(0)
+            old_dict = existing_db_copy[0].to_dict()
+            new_dict = lsa.to_dict()
+            difference = diff(old_dict, new_dict)
+            # api_dict = global_ls_db.to_api_dict()
+            output = []
 
-        global_ls_db.put_lsa(lsa)
+            for route_type, changes in difference.items():
+                for change_type, values in changes.items():
+                    for value in values:
+                        output.append(
+                            {
+                                "entity": {
+                                    "type": (
+                                        "network"
+                                        if lsa.ls_type == LSA_TYPE_NETWORK
+                                        else "router"
+                                    ),
+                                    "id": lsa.internal_entity_id,
+                                },
+                                JSONDIFF_TO_HUMAN[change_type]: (
+                                    {"link": {route_type: value}}
+                                    if lsa.ls_type != LSA_TYPE_NETWORK
+                                    else {"router": value}
+                                ),
+                            }
+                        )
+
+            for line in output:
+                print(json.dumps(line))
+            # print(json.dumps(api_dict, indent=2))
+            # sys.exit(0)
 
 
 from ospfclient import MSG_LSA_DELETE_NOTIFY
