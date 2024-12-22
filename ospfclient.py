@@ -15,9 +15,10 @@ import socket
 import struct
 import sys
 from asyncio import Event, Lock
+from functools import partial
 from ipaddress import ip_address as ip
 
-from lsdb import recv_lsa_callback
+from lsdb import recv_lsa_callback, LSDB
 
 FMT_APIMSGHDR = ">BBHL"
 FMT_APIMSGHDR_SIZE = struct.calcsize(FMT_APIMSGHDR)
@@ -1111,6 +1112,8 @@ async def async_main(args):
     c = OspfOpaqueClient(args.server)
     await c.connect()
 
+    lsdb = LSDB()
+
     try:
         # Start handling async messages from server.
         if sys.version_info[1] > 6:
@@ -1118,62 +1121,18 @@ async def async_main(args):
         else:
             asyncio.get_event_loop().create_task(c._handle_msg_loop())
 
-        # await c.req_lsdb_sync()
-        await c.monitor_lsa(recv_lsa_callback)
+        async def trigger_and_unhook(*args):
+            logging.warning("LSDB loaded!")
+            c.router_id_change_cb = None
+            lsdb.initial_load_active = False
 
-        #
-        # await c.req_lsdb_sync()
-        # await c.req_reachable_routers()
-        # await c.req_ism_states()
-        # await c.req_nsm_states()
-        #
-        # for action in next_action(args.actions):
-        #     _s = action.split(",")
-        #     what = _s.pop(False)
-        #     if what.casefold() == "wait":
-        #         stime = int(_s.pop(False))
-        #         logging.info("waiting %s seconds", stime)
-        #         await asyncio.sleep(stime)
-        #         logging.info("wait complete: %s seconds", stime)
-        #         continue
-        #     ltype = int(_s.pop(False))
-        #     if ltype == 11:
-        #         addr = ip(0)
-        #     else:
-        #         aval = _s.pop(False)
-        #         try:
-        #             addr = ip(int(aval))
-        #         except ValueError:
-        #             addr = ip(aval)
-        #     oargs = [addr, ltype, int(_s.pop(False)), int(_s.pop(False))]
-        #
-        #     if not await c.is_registered(oargs[1], oargs[2]):
-        #         await c.register_opaque_data_wait(oargs[1], oargs[2])
-        #
-        #     if what.casefold() == "add":
-        #         try:
-        #             b = bytes.fromhex(_s.pop(False))
-        #         except IndexError:
-        #             b = b""
-        #         logging.info("opaque data is %s octets", len(b))
-        #         # Needs to be multiple of 4 in length
-        #         mod = len(b) % 4
-        #         if mod:
-        #             b += b"\x00" * (4 - mod)
-        #             logging.info("opaque padding to %s octets", len(b))
-        #
-        #         await c.add_opaque_data(*oargs, b)
-        #     else:
-        #         assert what.casefold().startswith("del")
-        #         f = 0
-        #         if len(_s) >= 1:
-        #             try:
-        #                 f = int(_s.pop(False))
-        #             except IndexError:
-        #                 f = 0
-        #         await c.delete_opaque_data(*oargs, f)
-        # if not args.actions or args.exit:
-        #     return 0
+        logging.warning("Waiting for initial load to complete...")
+        await c.monitor_lsa(partial(recv_lsa_callback, lsdb=lsdb))
+
+        # We don't actually care about the router ID callback, but we use this to queue up an event
+        # in the sync queue so that we know when the initial load has completed, and we can start
+        # streaming the diff to our consumers
+        await c.monitor_router_id(trigger_and_unhook)
     except Exception as error:
         logging.error("async_main: unexpected error: %s", error, exc_info=True)
         return 2

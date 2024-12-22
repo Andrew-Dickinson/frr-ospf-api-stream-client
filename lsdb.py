@@ -545,6 +545,7 @@ class LSDB:
             Tuple[int, int, int], Tuple[LSA, datetime.datetime, bool]
         ] = {}
         self.expiring_queue = []
+        self.initial_load_active = True
 
         asyncio.create_task(self._clear_expired_items())
 
@@ -563,7 +564,7 @@ class LSDB:
                             # Print delete message
                             diff_list = lsa.diff_list(lsa, None)
                             for item in diff_list:
-                                print(json.dumps(item))
+                                self.publish_change_event(item)
                     else:
                         # The list is guaranteed to be ordered, no need to scan
                         # through all the items that aren't ready yet
@@ -641,8 +642,9 @@ class LSDB:
             "updated": int(datetime.datetime.now(tz=datetime.timezone.utc).timestamp()),
         }
 
-
-global_ls_db: Optional[LSDB] = None
+    def publish_change_event(self, event: dict) -> None:
+        if not self.initial_load_active:
+            print(json.dumps(event))
 
 
 def recv_lsa_callback(
@@ -652,18 +654,18 @@ def recv_lsa_callback(
     lsa_header: Tuple[int, int, int, int, int, int, int, int],
     lsa_data: bytes,
     full_lsa_message: bytes,
+    lsdb: LSDB = None,
 ):
-    global global_ls_db
-    if not global_ls_db:
-        global_ls_db = LSDB()
+    if lsdb is None:
+        raise ValueError("Invalid input, LSDB cannot be None")
 
     assert area_id == 0
 
     lsa = LSA.construct_lsa(lsa_header, lsa_data)
-    existing_db_copy, last_write, delete_bit = global_ls_db.get_lsa(lsa)
+    existing_db_copy, last_write, delete_bit = lsdb.get_lsa(lsa)
 
     if msg_type == MSG_LSA_DELETE_NOTIFY and existing_db_copy:
-        global_ls_db.delete_lsa(lsa)
+        lsdb.delete_lsa(lsa)
         return
 
     if lsa.ls_age == LSA_MAX_AGE and (not existing_db_copy or delete_bit):
@@ -678,16 +680,16 @@ def recv_lsa_callback(
         ):
             return  # Drop per RFC 2328 Section 13.0 (5)(a)
 
-        global_ls_db.put_lsa(lsa)
+        lsdb.put_lsa(lsa)
 
         if existing_db_copy:
             output = existing_db_copy.diff_list(existing_db_copy, lsa)
             for line in output:
-                print(json.dumps(line))
+                lsdb.publish_change_event(line)
         else:
             output = lsa.diff_list(None, lsa)
             for line in output:
-                print(json.dumps(line))
+                lsdb.publish_change_event(line)
 
 
 from ospfclient import MSG_LSA_DELETE_NOTIFY
