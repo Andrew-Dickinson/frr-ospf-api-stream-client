@@ -4,17 +4,13 @@ import datetime
 import ipaddress
 import json
 import logging
-import math
 import struct
-import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Literal, Tuple, Dict, Any, Callable, Optional, List, Union
 
 from frozendict import frozendict
 import jsondiff as jd
-from jsondiff import diff
 
 import netaddr
 
