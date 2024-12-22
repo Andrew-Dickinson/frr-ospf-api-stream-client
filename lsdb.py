@@ -560,11 +560,15 @@ class LSDB:
                             lsa.identifier_tuple in self.lsa_dict
                             and self.lsa_dict[lsa.identifier_tuple][2]
                         ):
-                            del self.lsa_dict[lsa.identifier_tuple]
-                            # Print delete message
+                            # Publish delete message
                             diff_list = lsa.diff_list(lsa, None)
                             for item in diff_list:
-                                self.publish_change_event(item)
+                                self.publish_change_event(
+                                    item, self.lsa_dict[lsa.identifier_tuple][1]
+                                )
+
+                            # Delete item
+                            del self.lsa_dict[lsa.identifier_tuple]
                     else:
                         # The list is guaranteed to be ordered, no need to scan
                         # through all the items that aren't ready yet
@@ -594,13 +598,15 @@ class LSDB:
 
             self.expiring_queue.append((delete_recv_time + POST_DELETE_LSA_TTL, lsa))
 
-    def put_lsa(self, lsa: LSA) -> None:
+    def put_lsa(self, lsa: LSA) -> datetime.datetime:
+        write_time = datetime.datetime.now(tz=datetime.timezone.utc)
         self.lsa_dict[lsa.identifier_tuple] = (
             lsa,
-            datetime.datetime.now(tz=datetime.timezone.utc),
+            write_time,
             False,
         )
         lsa.attach_to_lsdb(self)
+        return write_time
 
     @property
     def lsas_by_entity(self):
@@ -642,9 +648,15 @@ class LSDB:
             "updated": int(datetime.datetime.now(tz=datetime.timezone.utc).timestamp()),
         }
 
-    def publish_change_event(self, event: dict) -> None:
+    def publish_change_event(
+        self, event: dict, event_time: datetime.datetime = None
+    ) -> None:
         if not self.initial_load_active:
-            print(json.dumps(event))
+            if event_time is None:
+                event_time = datetime.datetime.now(tz=datetime.timezone.utc)
+            print(
+                json.dumps({"timestamp": int(event_time.timestamp() * 1000), **event})
+            )
 
     def recv_lsa_callback(
         self,
@@ -660,12 +672,11 @@ class LSDB:
         lsa = LSA.construct_lsa(lsa_header, lsa_data)
         existing_db_copy, last_write, delete_bit = self.get_lsa(lsa)
 
-        if msg_type == MSG_LSA_DELETE_NOTIFY and existing_db_copy:
+        if existing_db_copy and (
+            msg_type == MSG_LSA_DELETE_NOTIFY or lsa.ls_age == LSA_MAX_AGE
+        ):
             self.delete_lsa(lsa)
             return
-
-        if lsa.ls_age == LSA_MAX_AGE and (not existing_db_copy or delete_bit):
-            return  # Drop per RFC 2328 Section 13.0 (4)
 
         if delete_bit or not existing_db_copy or existing_db_copy < lsa:
             if (
@@ -676,16 +687,17 @@ class LSDB:
             ):
                 return  # Drop per RFC 2328 Section 13.0 (5)(a)
 
-            self.put_lsa(lsa)
-
+            lsa_publish_time = self.put_lsa(lsa) - datetime.timedelta(
+                seconds=lsa.ls_age
+            )
             if existing_db_copy:
                 output = existing_db_copy.diff_list(existing_db_copy, lsa)
                 for line in output:
-                    self.publish_change_event(line)
+                    self.publish_change_event(line, lsa_publish_time)
             else:
                 output = lsa.diff_list(None, lsa)
                 for line in output:
-                    self.publish_change_event(line)
+                    self.publish_change_event(line, lsa_publish_time)
 
 
 from ospfclient import MSG_LSA_DELETE_NOTIFY
