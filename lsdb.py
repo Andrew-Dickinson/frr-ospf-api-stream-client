@@ -618,11 +618,6 @@ class LSDB:
         dr_to_lsa_map: Dict[str, LSA] = {}
         for lsa, _ in self.lsa_dict.values():
             if lsa.ls_type == LSA_TYPE_NETWORK:
-                # network_cidr = addr_and_mask_to_cidr(lsa.ls_id, lsa.network_mask)
-                # networks[network_cidr] = {
-                #     "dr": lsa.ls_advertising_router__as_ip,
-                #     "routers": [router.id__as_ip for router in lsa.routers],
-                # }
                 dr_to_lsa_map[lsa.ls_id__as_ip] = lsa
 
         return dr_to_lsa_map
@@ -669,31 +664,10 @@ def recv_lsa_callback(
     assert area_id == 0
 
     lsa = LSA.construct_lsa(lsa_header, lsa_data)
-
     existing_db_copy, last_write, delete_bit = global_ls_db.get_lsa(lsa)
-    # ttl_expired = (
-    #     delete_bit
-    #     and (datetime.datetime.now(tz=datetime.timezone.utc) - last_write)
-    #     > POST_DELETE_LSA_TTL
-    # )
 
     if msg_type == MSG_LSA_DELETE_NOTIFY and existing_db_copy:
         global_ls_db.delete_lsa(lsa)
-
-        # # Disabled for router and network LSAs to allow diffs
-        # if lsa.ls_type == LSA_TYPE_AS_EXTERNAL:
-        #     global_ls_db.delete_lsa(lsa)
-        #     print(
-        #         json.dumps(
-        #             {
-        #                 "entity": {
-        #                     "type": "router",
-        #                     "id": lsa.internal_entity_id,
-        #                 },
-        #                 "remove": {"link": {"external": lsa.to_dict()}},
-        #             }
-        #         )
-        #     )
         return
 
     if lsa.ls_age == LSA_MAX_AGE and (not existing_db_copy or delete_bit):
@@ -710,7 +684,6 @@ def recv_lsa_callback(
 
         global_ls_db.put_lsa(lsa)
 
-        # if existing_db_copy and not ttl_expired:
         if existing_db_copy:
             output = existing_db_copy.diff_list(existing_db_copy, lsa)
             for line in output:
