@@ -155,6 +155,7 @@ class LSA(abc.ABC):
     ):
         self.header = lsa_header
         self.body = lsa_data
+        self.lsdb = None
 
     def __repr__(self):
         return f"Type {self.ls_type} ({LSA_TYPE_NAMES[self.ls_type]}) LSA: ID {self.ls_id__as_ip} with seq num {self.ls_seq} from {self.ls_advertising_router__as_ip}"
@@ -178,9 +179,19 @@ class LSA(abc.ABC):
 
         return False
 
+    def attach_to_lsdb(self, lsdb: "LSDB") -> None:
+        self.lsdb = lsdb
+
     @property
     def identifier_tuple(self):
         return self.ls_type, self.ls_id, self.ls_advertising_router
+
+    @property
+    def internal_entity_id(self):
+        if self.ls_type == LSA_TYPE_NETWORK:
+            return self.network_cidr
+        else:
+            return self.ls_advertising_router__as_ip
 
     @property
     def header_ext(self) -> Tuple:
@@ -203,7 +214,10 @@ class LSA(abc.ABC):
         }
 
     def to_dict(self) -> Dict[str, Any]:
-        return {**self.header_dict(), **self._to_dict()}
+        return {
+            # **self.header_dict(),
+            **self._to_dict(),
+        }
 
     def _to_dict(self) -> Dict[str, Any]:
         raise NotImplementedError("Subclasses must implement this function")
@@ -274,22 +288,48 @@ class RouterLSA(LSA):
         return links
 
     def _to_dict(self) -> Dict[str, Any]:
-        return {
-            "router_lsa_options_b": bool(self.router_lsa_options_b),
-            "router_lsa_options_e": bool(self.router_lsa_options_e),
-            "router_lsa_options_v": bool(self.router_lsa_options_v),
-            "link_count": self.link_count,
-            "links": [
-                {
-                    "id": link.id__as_ip,
-                    "data": link.data__as_ip,
-                    "type": link.type,
-                    "tos_count": link.tos_count,
-                    "metric": link.metric,
-                }
-                for link in self.links
-            ],
-        }
+        links_json = defaultdict(list)
+        for link in self.links:
+            if link.type == 1:
+                links_json["router"].append(
+                    {"id": link.id__as_ip, "metric": link.metric}
+                )
+            elif link.type == 2:
+                if not self.lsdb:
+                    raise RuntimeError(
+                        "You must attach an LSDB instance to this LSA to serialize network links"
+                    )
+
+                network_lsa = self.lsdb.dr_map.get(link.id__as_ip)
+
+                if not network_lsa:
+                    raise ValueError(
+                        f"Could not find network LSA for DR address {link.id__as_ip} in LSDB {self.lsdb}"
+                    )
+
+                network_cidr = addr_and_mask_to_cidr(
+                    network_lsa.ls_id, network_lsa.network_mask
+                )
+                links_json["network"].append(
+                    {
+                        "id": network_cidr,
+                        # "id": link.id__as_ip,  ### WRONG
+                        "metric": link.metric,
+                    }
+                )
+            elif link.type == 3:
+                links_json["stubnet"].append(
+                    {
+                        "id": addr_and_mask_to_cidr(link.id, link.data),
+                        "metric": link.metric,
+                    }
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported link type: {link.type} in {link} on {self}"
+                )
+
+        return links_json
 
 
 class NetworkLSA(LSA):
@@ -328,15 +368,14 @@ class NetworkLSA(LSA):
 
         return routers
 
+    @property
+    def network_cidr(self):
+        return addr_and_mask_to_cidr(self.ls_id, self.network_mask)
+
     def _to_dict(self) -> Dict[str, Any]:
         return {
-            "network_mask": self.network_mask,
-            "routers": [
-                {
-                    "id": router.id__as_ip,
-                }
-                for router in self.routers
-            ],
+            "dr": self.ls_advertising_router__as_ip,
+            "routers": [router.id__as_ip for router in self.routers],
         }
 
 
@@ -356,13 +395,18 @@ class ASExternalLSA(LSA):
         return struct.unpack(AS_EXTERNAL_HEADER_EXT, self.body[:16])
 
     def _to_dict(self) -> Dict[str, Any]:
-        return {
-            "network_mask": self.network_mask,
-            "is_type_2": bool(self.is_type_2),
-            "metric": self.metric,
-            "forwarding_address": self.forwarding_address__as_ip,
-            "external_route_tag": self.external_route_tag,
+        route = {
+            "id": addr_and_mask_to_cidr(self.ls_id, self.network_mask),
         }
+        if self.is_type_2:
+            route["metric2"] = self.metric
+        else:
+            route["metric"] = self.metric
+
+        if self.forwarding_address:
+            route["via"] = self.forwarding_address__as_ip
+
+        return route
 
 
 def hexdump(data: bytes):
@@ -390,10 +434,19 @@ class LSDB:
             lsa,
             datetime.datetime.now(tz=datetime.timezone.utc),
         )
+        lsa.attach_to_lsdb(self)
+
+    @property
+    def lsas_by_entity(self):
+        entity_mapping: Dict[str, LSA] = {}
+        for lsa, _ in self.lsa_dict.values():
+            entity_mapping[lsa.internal_entity_id] = lsa
+
+        return entity_mapping
 
     @property
     def dr_map(self):
-        dr_to_lsa_map = {}
+        dr_to_lsa_map: Dict[str, LSA] = {}
         for lsa, _ in self.lsa_dict.values():
             if lsa.ls_type == LSA_TYPE_NETWORK:
                 # network_cidr = addr_and_mask_to_cidr(lsa.ls_id, lsa.network_mask)
@@ -413,60 +466,14 @@ class LSDB:
 
         for lsa, _ in self.lsa_dict.values():
             if lsa.ls_type == LSA_TYPE_NETWORK:
-                network_cidr = addr_and_mask_to_cidr(lsa.ls_id, lsa.network_mask)
-                networks[network_cidr] = {
-                    "dr": lsa.ls_advertising_router__as_ip,
-                    "routers": [router.id__as_ip for router in lsa.routers],
-                }
-                # dr_to_network_cidr_map[lsa.ls_id__as_ip] = network_cidr
+                networks[lsa.internal_entity_id] = lsa.to_dict()
 
         for lsa, _ in self.lsa_dict.values():
             if lsa.ls_type == LSA_TYPE_ROUTER:
-                for link in lsa.links:
-                    if link.type == 1:
-                        routers[lsa.ls_advertising_router__as_ip]["links"][
-                            "router"
-                        ].append({"id": link.id__as_ip, "metric": link.metric})
-                    elif link.type == 2:
-                        network_lsa = dr_to_lsa_map[link.id__as_ip]
-                        network_cidr = addr_and_mask_to_cidr(
-                            network_lsa.ls_id, network_lsa.network_mask
-                        )
-                        routers[lsa.ls_advertising_router__as_ip]["links"][
-                            "network"
-                        ].append(
-                            {
-                                "id": network_cidr,
-                                "metric": link.metric,
-                            }
-                        )
-                    elif link.type == 3:
-                        routers[lsa.ls_advertising_router__as_ip]["links"][
-                            "stubnet"
-                        ].append(
-                            {
-                                "id": addr_and_mask_to_cidr(link.id, link.data),
-                                "metric": link.metric,
-                            }
-                        )
-                    else:
-                        raise ValueError(
-                            f"Unsupported link type: {link.type} in {link} on {lsa}"
-                        )
+                routers[lsa.internal_entity_id]["links"] |= lsa.to_dict()
             elif lsa.ls_type == LSA_TYPE_AS_EXTERNAL:
-                route = {
-                    "id": addr_and_mask_to_cidr(lsa.ls_id, lsa.network_mask),
-                }
-                if lsa.is_type_2:
-                    route["metric2"] = lsa.metric
-                else:
-                    route["metric"] = lsa.metric
-
-                if lsa.forwarding_address:
-                    route["via"] = lsa.forwarding_address__as_ip
-
-                routers[lsa.ls_advertising_router__as_ip]["links"]["external"].append(
-                    route
+                routers[lsa.internal_entity_id]["links"]["external"].append(
+                    lsa.to_dict()
                 )
 
         return {
