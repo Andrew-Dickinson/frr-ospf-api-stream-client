@@ -10,7 +10,7 @@ included in FRR. You should start there if you are trying to develop your own
 custom FRR OSPF API client.
 
 ```
-> ospf-stream-client -s <frr OSPF API server addr>
+> ospf-stream-client --server <frr OSPF API server addr>
 2024-12-23 04:29:32,352 WARNING: CLIENT: root Waiting for initial load to complete...
 2024-12-23 04:29:32,465 WARNING: CLIENT: root LSDB loaded!
 {"timestamp": 1734928168632, "entity": {"type": "router", "id": "10.69.5.52"}, "added": {"link": {"router": {"id": "10.69.6.10", "metric": 100}}}}
@@ -20,6 +20,11 @@ custom FRR OSPF API client.
 {"timestamp": 1734928164890, "entity": {"type": "router", "id": "10.69.5.51"}, "added": {"link": {"router": {"id": "10.69.1.65", "metric": 100}}}}
 ```
 
+## Limitations
+
+This client doesn't implement support for multi-area OSPF LSAs or IPv6 (OSPFv3) and 
+will only work for IPv4 OSPF networks where all routers are present in the backbone network. 
+Exact behavior for trying to use this tool on multi-area networks is undefined but expect crashes
 
 ## Output Format
 
@@ -41,11 +46,29 @@ pip install frr-ospf-api-stream-client
 
 then invoke the tool with the CLI command:
 ```shell
-ospf-stream-client -s <frr OSPF API server adress>
+ospf-stream-client --server <frr OSPF API server adress>
 ```
 
 Available flags:
-- `--abc`: def
+- `--server <frr OSPF API server adress>`: Specify the address that the FRR OSPF API server is running on. 
+    Defaults to `localhost`. Note: the FRR OSPF API sockets protocol is somewhat esoteric. It relies 
+    on bidirectional sockets being intiated with dynamic port numbers between the client and the 
+    server, so while it is technically possible to run the client on a separate host from the 
+    server, the connection will not work across most firewalls and definitely WILL NOT work through
+    any kind of NAT
+- `--ws-listen <interface address>:<listen port>`: If provided, we will use [autobahn](https://github.com/crossbario/autobahn-python) 
+    to listen on the specified interace and port for inbound websockets connections. These connections
+    are very simple, they do not accept any input from clients. All clients recieve an identical 
+    copy of the event stream, one JSON event per WS message
+- `--events-path-prefix <folder path>`: If provided, we will write the event stream to disk, paritioning
+    into files of one hour each, within the specified prefix. You likely want some kind of cleanup job
+    to compress/archive/delete these files to avoid filling up your disk
+- `--snapshots-path-prefix <folder path>`: If provided, we will write LSDB snapshots to disk, once per minute
+    grouping by year, month, day, hour, etc, within the specified prefix. You likely want some kind of cleanup job
+    to compress/archive/delete these files to avoid filling up your disk
+- `--mute-stdout-stream`: By default, the event stream will be written to stdout. Provide this flag
+    to disable that behavior
+- `-v, --verbose`: Increase the verbosity of the stderr log messages. Useful for troubleshooting upstream API issues
 
 ## Dev Setup
 
@@ -62,7 +85,7 @@ pip install -e .
 
 then invoke the tool with the CLI command:
 ```sh
-frr-ospf-api-stream-client -s <frr OSPF API server adress>
+frr-ospf-api-stream-client --server <frr OSPF API server adress>
 ```
 
 ## Running the unit tests
@@ -112,3 +135,4 @@ Don't forget to give the project a star! Thanks again!
  * [Best-README-Template](https://github.com/othneildrew/Best-README-Template/)
  * [FRR OSPF API Python Example](https://github.com/FRRouting/frr/blob/master/ospfclient/ospfclient.py)
  * [RFC 2328](https://datatracker.ietf.org/doc/html/rfc2328)
+ * [autobahn](https://github.com/crossbario/autobahn-python)
