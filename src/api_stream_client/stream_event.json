@@ -1,0 +1,222 @@
+{
+  "type": "object",
+  "required": [
+    "timestamp",
+    "entity"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "timestamp": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "entity": {
+      "type": "object",
+      "required": [
+        "type",
+        "id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "pattern": "(?:^router$)|(?:^network$)"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}(\\/[0-9]{1,2})?$"
+        }
+      }
+    },
+    "added": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "link": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "router": {
+              "type": "object",
+              "required": [
+                "id",
+                "metric"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$"
+                },
+                "metric": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
+            },
+            "stubnet": {
+              "type": "object",
+                "required": [
+                  "id",
+                  "metric"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\/[0-9]{1,2}$"
+                  },
+                  "metric": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+            },
+            "external": {
+              "type": "object",
+              "required": [
+                "id"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\/[0-9]{1,2}$"
+                },
+                "metric": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "metric2": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "via": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$"
+                }
+              },
+              "additionalProperties": false
+            },
+            "network": {
+              "type": "object",
+              "required": [
+                "id",
+                "metric"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\/[0-9]{1,2}$"
+                },
+                "metric": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "router": {
+          "type": "string",
+          "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$"
+        }
+      }
+    },
+    "removed": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "link": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "router": {
+              "type": "object",
+              "required": [
+                "id",
+                "metric"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$"
+                },
+                "metric": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
+            },
+            "stubnet": {
+              "type": "object",
+                "required": [
+                  "id",
+                  "metric"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\/[0-9]{1,2}$"
+                  },
+                  "metric": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+            },
+            "external": {
+              "type": "object",
+              "required": [
+                "id"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\/[0-9]{1,2}$"
+                },
+                "metric": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "metric2": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "via": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$"
+                }
+              },
+              "additionalProperties": false
+            },
+            "network": {
+              "type": "object",
+              "required": [
+                "id",
+                "metric"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\/[0-9]{1,2}$"
+                },
+                "metric": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "router": {
+          "type": "string",
+          "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$"
+        }
+      }
+    }
+  }
+}
