@@ -85,7 +85,7 @@ pip install -e .
 
 then invoke the tool with the CLI command:
 ```sh
-frr-ospf-api-stream-client --server <frr OSPF API server adress>
+ospf-stream-client --server <frr OSPF API server adress>
 ```
 
 ## Running the unit tests
