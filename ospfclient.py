@@ -16,10 +16,13 @@ import socket
 import struct
 import sys
 from asyncio import Lock
+from functools import partial
 from ipaddress import ip_address as ip
 from typing import Dict
 
-from archival import archive_event_message
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+from archival import archive_event_message, archive_db_snapshot
 from lsdb import LSDB
 from websockets_server import LSDBStreamProtocol, run_websocket_server
 
@@ -579,12 +582,16 @@ class OspfLSDBClient(OspfApiClient):
         await self.req_router_id_sync()
 
 
-def print_event(event: Dict):
-    print(json.dumps(event))
+def write_db_snapshot_loop(lsdb: LSDB):
+    db_snapshot = lsdb.to_api_dict()
+    archive_db_snapshot(db_snapshot)
+    logging.info("Wrote DB snapshot due to heartbeat")
 
 
-def ws_broadcast_event(event: Dict):
-    LSDBStreamProtocol.broadcast(json.dumps(event))
+def initialize_scheduler():
+    scheduler = AsyncIOScheduler()
+    scheduler.start()
+    return scheduler
 
 
 async def async_main(args):
@@ -592,6 +599,13 @@ async def async_main(args):
     await c.connect()
 
     lsdb = LSDB()
+
+    def print_event(event: Dict):
+        print(json.dumps(event))
+
+    def ws_broadcast_event(event: Dict):
+        LSDBStreamProtocol.broadcast(json.dumps(event))
+
     lsdb.add_event_listener(print_event)
     lsdb.add_event_listener(ws_broadcast_event)
     lsdb.add_event_listener(archive_event_message)
@@ -620,6 +634,10 @@ async def async_main(args):
 
         # Once the LSDB is loaded, Initiate the async websockets server in the background
         asyncio.create_task(run_websocket_server())
+
+        # Also start up an async task to write out api.andrew.mesh API payloads
+        scheduler = initialize_scheduler()
+        scheduler.add_job(partial(write_db_snapshot_loop, lsdb), "cron", minute="*")
     except Exception as error:
         logging.error("async_main: unexpected error: %s", error, exc_info=True)
         return 2

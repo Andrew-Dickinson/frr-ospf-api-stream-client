@@ -645,8 +645,6 @@ class LSDB:
         return dr_to_lsa_map
 
     def to_api_dict(self) -> Dict[str, Any]:
-        dr_to_lsa_map = self.dr_map
-
         networks = {}
         routers = defaultdict(lambda: {"links": defaultdict(set)})
 
@@ -664,7 +662,9 @@ class LSDB:
 
         return {
             "areas": {"0.0.0.0": {"networks": networks, "routers": routers}},
-            "updated": int(datetime.datetime.now(tz=datetime.timezone.utc).timestamp()),
+            "updated": int(
+                datetime.datetime.now(tz=datetime.timezone.utc).timestamp() * 1000
+            ),
         }
 
     def publish_change_event(
