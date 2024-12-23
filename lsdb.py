@@ -610,7 +610,12 @@ class LSDB:
                 True,
             )
 
-            self.expiring_queue.append((delete_recv_time + POST_DELETE_LSA_TTL, lsa))
+            self.expiring_queue.append(
+                (
+                    delete_recv_time + POST_DELETE_LSA_TTL,
+                    self.lsa_dict[lsa.identifier_tuple][0],
+                )
+            )
 
     def put_lsa(self, lsa: LSA) -> datetime.datetime:
         write_time = datetime.datetime.now(tz=datetime.timezone.utc)
