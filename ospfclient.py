@@ -10,6 +10,7 @@
 import argparse
 import asyncio
 import errno
+import json
 import logging
 import socket
 import struct
@@ -17,6 +18,7 @@ import sys
 from asyncio import Event, Lock
 from functools import partial
 from ipaddress import ip_address as ip
+from typing import Dict
 
 from lsdb import LSDB
 
@@ -1108,11 +1110,16 @@ def next_action(action_list=None):
             yield action.strip()
 
 
+def print_event(event: Dict):
+    print(json.dumps(event))
+
+
 async def async_main(args):
     c = OspfOpaqueClient(args.server)
     await c.connect()
 
     lsdb = LSDB()
+    lsdb.add_event_listener(print_event)
 
     try:
         # Start handling async messages from server.

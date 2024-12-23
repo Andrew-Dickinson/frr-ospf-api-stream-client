@@ -546,6 +546,7 @@ class LSDB:
         ] = {}
         self.expiring_queue = []
         self.initial_load_active = True
+        self.event_listeners = []
 
         asyncio.create_task(self._clear_expired_items())
 
@@ -654,9 +655,14 @@ class LSDB:
         if not self.initial_load_active:
             if event_time is None:
                 event_time = datetime.datetime.now(tz=datetime.timezone.utc)
-            print(
-                json.dumps({"timestamp": int(event_time.timestamp() * 1000), **event})
-            )
+
+            output_event = {"timestamp": int(event_time.timestamp() * 1000), **event}
+
+            for handler in self.event_listeners:
+                handler(output_event)
+
+    def add_event_listener(self, listener: Callable[[Dict], None]) -> None:
+        self.event_listeners.append(listener)
 
     def recv_lsa_callback(
         self,
