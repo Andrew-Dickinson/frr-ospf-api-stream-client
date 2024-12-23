@@ -20,6 +20,7 @@ from ipaddress import ip_address as ip
 from typing import Dict
 
 from lsdb import LSDB
+from websockets_server import LSDBStreamProtocol, run_websocket_server
 
 FMT_APIMSGHDR = ">BBHL"
 FMT_APIMSGHDR_SIZE = struct.calcsize(FMT_APIMSGHDR)
@@ -581,12 +582,17 @@ def print_event(event: Dict):
     print(json.dumps(event))
 
 
+def ws_broadcast_event(event: Dict):
+    LSDBStreamProtocol.broadcast(json.dumps(event))
+
+
 async def async_main(args):
     c = OspfLSDBClient(args.server)
     await c.connect()
 
     lsdb = LSDB()
     lsdb.add_event_listener(print_event)
+    lsdb.add_event_listener(ws_broadcast_event)
 
     try:
         asyncio.create_task(c._handle_msg_loop())
@@ -633,6 +639,9 @@ def main(*args):
     )
 
     logging.info("ospfclient: starting")
+
+    # Initiate the async websockets server in the background
+    run_websocket_server()
 
     status = 3
     try:
