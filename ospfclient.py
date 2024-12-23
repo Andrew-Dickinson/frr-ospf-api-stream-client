@@ -15,8 +15,7 @@ import logging
 import socket
 import struct
 import sys
-from asyncio import Event, Lock
-from functools import partial
+from asyncio import Lock
 from ipaddress import ip_address as ip
 from typing import Dict
 
@@ -150,111 +149,6 @@ class MsgTypeError(Exception):
 
 class SeqNumError(Exception):
     pass
-
-
-# ---------
-# LSA Types
-# ---------
-
-LSA_TYPE_UNKNOWN = 0
-LSA_TYPE_ROUTER = 1
-LSA_TYPE_NETWORK = 2
-LSA_TYPE_SUMMARY = 3
-LSA_TYPE_ASBR_SUMMARY = 4
-LSA_TYPE_AS_EXTERNAL = 5
-LSA_TYPE_GROUP_MEMBER = 6
-LSA_TYPE_AS_NSSA = 7
-LSA_TYPE_EXTERNAL_ATTRIBUTES = 8
-LSA_TYPE_OPAQUE_LINK = 9
-LSA_TYPE_OPAQUE_AREA = 10
-LSA_TYPE_OPAQUE_AS = 11
-
-
-def lsa_typename(lsa_type):
-    names = {
-        LSA_TYPE_ROUTER: "LSA:ROUTER",
-        LSA_TYPE_NETWORK: "LSA:NETWORK",
-        LSA_TYPE_SUMMARY: "LSA:SUMMARY",
-        LSA_TYPE_ASBR_SUMMARY: "LSA:ASBR_SUMMARY",
-        LSA_TYPE_AS_EXTERNAL: "LSA:AS_EXTERNAL",
-        LSA_TYPE_GROUP_MEMBER: "LSA:GROUP_MEMBER",
-        LSA_TYPE_AS_NSSA: "LSA:AS_NSSA",
-        LSA_TYPE_EXTERNAL_ATTRIBUTES: "LSA:EXTERNAL_ATTRIBUTES",
-        LSA_TYPE_OPAQUE_LINK: "LSA:OPAQUE_LINK",
-        LSA_TYPE_OPAQUE_AREA: "LSA:OPAQUE_AREA",
-        LSA_TYPE_OPAQUE_AS: "LSA:OPAQUE_AS",
-    }
-    return names.get(lsa_type, str(lsa_type))
-
-
-# ------------------------------
-# Interface State Machine States
-# ------------------------------
-
-ISM_DEPENDUPON = 0
-ISM_DOWN = 1
-ISM_LOOPBACK = 2
-ISM_WAITING = 3
-ISM_POINTTOPOINT = 4
-ISM_DROTHER = 5
-ISM_BACKUP = 6
-ISM_DR = 7
-
-
-def ism_name(state):
-    names = {
-        ISM_DEPENDUPON: "ISM_DEPENDUPON",
-        ISM_DOWN: "ISM_DOWN",
-        ISM_LOOPBACK: "ISM_LOOPBACK",
-        ISM_WAITING: "ISM_WAITING",
-        ISM_POINTTOPOINT: "ISM_POINTTOPOINT",
-        ISM_DROTHER: "ISM_DROTHER",
-        ISM_BACKUP: "ISM_BACKUP",
-        ISM_DR: "ISM_DR",
-    }
-    return names.get(state, str(state))
-
-
-# -----------------------------
-# Neighbor State Machine States
-# -----------------------------
-
-NSM_DEPENDUPON = 0
-NSM_DELETED = 1
-NSM_DOWN = 2
-NSM_ATTEMPT = 3
-NSM_INIT = 4
-NSM_TWOWAY = 5
-NSM_EXSTART = 6
-NSM_EXCHANGE = 7
-NSM_LOADING = 8
-NSM_FULL = 9
-
-
-def nsm_name(state):
-    names = {
-        NSM_DEPENDUPON: "NSM_DEPENDUPON",
-        NSM_DELETED: "NSM_DELETED",
-        NSM_DOWN: "NSM_DOWN",
-        NSM_ATTEMPT: "NSM_ATTEMPT",
-        NSM_INIT: "NSM_INIT",
-        NSM_TWOWAY: "NSM_TWOWAY",
-        NSM_EXSTART: "NSM_EXSTART",
-        NSM_EXCHANGE: "NSM_EXCHANGE",
-        NSM_LOADING: "NSM_LOADING",
-        NSM_FULL: "NSM_FULL",
-    }
-    return names.get(state, str(state))
-
-
-class WithNothing:
-    "An object that does nothing when used with `with` statement."
-
-    async def __aenter__(self):
-        return
-
-    async def __aexit__(self, *args, **kwargs):
-        return
 
 
 # --------------
@@ -530,28 +424,13 @@ class OspfApiClient:
         logging.debug("SEND: %s: request LSDB sync", self)
         await self.msg_send_raises(MSG_SYNC_LSDB, mp)
 
-    async def req_reachable_routers(self):
-        "Request a dump of all reachable routers."
-        logging.debug("SEND: %s: request reachable changes", self)
-        await self.msg_send_raises(MSG_SYNC_REACHABLE)
-
-    async def req_ism_states(self):
-        "Request a dump of the current ISM states of all interfaces."
-        logging.debug("SEND: %s: request ISM changes", self)
-        await self.msg_send_raises(MSG_SYNC_ISM)
-
-    async def req_nsm_states(self):
-        "Request a dump of the current NSM states of all neighbors."
-        logging.debug("SEND: %s: request NSM changes", self)
-        await self.msg_send_raises(MSG_SYNC_NSM)
-
     async def req_router_id_sync(self):
         "Request a dump of the current NSM states of all neighbors."
         logging.debug("SEND: %s: request router ID sync", self)
         await self.msg_send_raises(MSG_SYNC_ROUTER_ID)
 
 
-class OspfOpaqueClient(OspfApiClient):
+class OspfLSDBClient(OspfApiClient):
     """A client connection to OSPF Daemon for manipulating Opaque LSA data.
 
     The client object is not created in a connected state.  To connect to the server
@@ -571,63 +450,20 @@ class OspfOpaqueClient(OspfApiClient):
         functions such as `socket.socket`, `socket.setsockopt`, `socket.bind`.
     """
 
-    def __init__(self, server="localhost", wait_ready=False):
+    def __init__(self, server="localhost"):
         handlers = {
             MSG_LSA_UPDATE_NOTIFY: self._lsa_change_msg,
             MSG_LSA_DELETE_NOTIFY: self._lsa_change_msg,
-            MSG_NEW_IF: self._if_msg,
-            MSG_DEL_IF: self._if_msg,
-            MSG_ISM_CHANGE: self._if_change_msg,
-            MSG_NSM_CHANGE: self._nbr_change_msg,
-            MSG_REACHABLE_CHANGE: self._reachable_msg,
             MSG_ROUTER_ID_CHANGE: self._router_id_msg,
         }
-        if wait_ready:
-            handlers[MSG_READY_NOTIFY] = self._ready_msg
 
         super().__init__(server, handlers)
 
-        self.wait_ready = wait_ready
-        self.ready_lock = Lock() if wait_ready else WithNothing()
-        self.ready_cond = {
-            LSA_TYPE_OPAQUE_LINK: {},
-            LSA_TYPE_OPAQUE_AREA: {},
-            LSA_TYPE_OPAQUE_AS: {},
-        }
         self.router_id = ip(0)
         self.router_id_change_cb = None
 
         self.lsid_seq_num = {}
-
         self.lsa_change_cb = None
-        self.opaque_change_cb = {}
-
-        self.reachable_routers = set()
-        self.reachable_change_cb = None
-
-        self.if_area = {}
-        self.ism_states = {}
-        self.ism_change_cb = None
-
-        self.nsm_states = {}
-        self.nsm_change_cb = None
-
-    async def _register_opaque_data(self, lsa_type, otype):
-        async with self.ready_lock:
-            cond = self.ready_cond[lsa_type].get(otype)
-            assert cond is None, "multiple registers for {} opaque-type {}".format(
-                lsa_typename(lsa_type), otype
-            )
-
-            logging.debug("register %s opaque-type %s", lsa_typename(lsa_type), otype)
-
-            mt = MSG_REGISTER_OPAQUETYPE
-            mp = struct.pack(msg_fmt[mt], lsa_type, otype)
-            await self.msg_send_raises(mt, mp)
-
-            # If we are not waiting, mark ready for register check
-            if not self.wait_ready:
-                self.ready_cond[lsa_type][otype] = True
 
     async def _handle_msg_loop(self):
         try:
@@ -648,101 +484,6 @@ class OspfOpaqueClient(OspfApiClient):
             logging.exception("Exception while handling async msg")
             return 99
 
-    @staticmethod
-    def _opaque_args(lsa_type, otype, oid, mp):
-        lsid = (otype << 24) | oid
-        return 0, 0, lsa_type, lsid, 0, 0, 0, FMT_LSA_HEADER_SIZE + len(mp)
-
-    @staticmethod
-    def _make_opaque_lsa(lsa_type, otype, oid, mp):
-        # /* Make a new LSA from parameters */
-        lsa = struct.pack(
-            FMT_LSA_HEADER, *OspfOpaqueClient._opaque_args(lsa_type, otype, oid, mp)
-        )
-        lsa += mp
-        return lsa
-
-    async def _ready_msg(self, mt, msg, extra, lsa_type, otype, addr):
-        assert self.wait_ready
-
-        if lsa_type == LSA_TYPE_OPAQUE_LINK:
-            e = "ifaddr {}".format(ip(addr))
-        elif lsa_type == LSA_TYPE_OPAQUE_AREA:
-            e = "area {}".format(ip(addr))
-        else:
-            e = ""
-        logging.info(
-            "RECV: %s ready notify for %s opaque-type %s%s",
-            self,
-            lsa_typename(lsa_type),
-            otype,
-            e,
-        )
-
-        # Signal all waiting senders they can send now.
-        async with self.ready_lock:
-            cond = self.ready_cond[lsa_type].get(otype)
-            self.ready_cond[lsa_type][otype] = True
-
-        if cond is True:
-            logging.warning(
-                "RECV: dup ready received for %s opaque-type %s",
-                lsa_typename(lsa_type),
-                otype,
-            )
-        elif cond:
-            for evt in cond:
-                evt.set()
-
-    async def _if_msg(self, mt, msg, extra, *args):
-        if mt == MSG_NEW_IF:
-            ifaddr, aid = args
-        else:
-            assert mt == MSG_DEL_IF
-            ifaddr, aid = args[0], 0
-        logging.info(
-            "RECV: %s ifaddr %s areaid %s", api_msgname(mt), ip(ifaddr), ip(aid)
-        )
-
-    async def _if_change_msg(self, mt, msg, extra, ifaddr, aid, state):
-        ifaddr = ip(ifaddr)
-        aid = ip(aid)
-
-        logging.info(
-            "RECV: %s ifaddr %s areaid %s state %s",
-            api_msgname(mt),
-            ifaddr,
-            aid,
-            ism_name(state),
-        )
-
-        self.if_area[ifaddr] = aid
-        self.ism_states[ifaddr] = state
-
-        if self.ism_change_cb:
-            self.ism_change_cb(ifaddr, aid, state)
-
-    async def _nbr_change_msg(self, mt, msg, extra, ifaddr, nbraddr, router_id, state):
-        ifaddr = ip(ifaddr)
-        nbraddr = ip(nbraddr)
-        router_id = ip(router_id)
-
-        logging.info(
-            "RECV: %s ifaddr %s nbraddr %s router_id %s state %s",
-            api_msgname(mt),
-            ifaddr,
-            nbraddr,
-            router_id,
-            nsm_name(state),
-        )
-
-        if ifaddr not in self.nsm_states:
-            self.nsm_states[ifaddr] = {}
-        self.nsm_states[ifaddr][(nbraddr, router_id)] = state
-
-        if self.nsm_change_cb:
-            self.nsm_change_cb(ifaddr, nbraddr, router_id, state)
-
     async def _lsa_change_msg(self, mt, msg, extra, ifaddr, aid, is_self, *ls_header):
         (
             lsa_age,  # ls_age,
@@ -754,8 +495,6 @@ class OspfOpaqueClient(OspfApiClient):
             _,  # ls_cksum,
             ls_len,
         ) = ls_header
-
-        otype = (ls_id >> 24) & 0xFF
 
         if mt == MSG_LSA_UPDATE_NOTIFY:
             ts = "update"
@@ -772,33 +511,12 @@ class OspfOpaqueClient(OspfApiClient):
             ls_len,
             lsa_age,
         )
-        idx = (lsa_type, otype)
 
         pre_lsa_size = msg_size[mt] - FMT_LSA_HEADER_SIZE
         lsa = msg[pre_lsa_size:]
 
-        if idx in self.opaque_change_cb:
-            self.opaque_change_cb[idx](mt, ifaddr, aid, ls_header, extra, lsa)
-
         if self.lsa_change_cb:
             self.lsa_change_cb(mt, ifaddr, aid, ls_header, extra, lsa)
-
-    async def _reachable_msg(self, mt, msg, extra, nadd, nremove):
-        router_ids = struct.unpack(">{}I".format(nadd + nremove), extra)
-        router_ids = [ip(x) for x in router_ids]
-        logging.info(
-            "RECV: %s added %s removed %s",
-            api_msgname(mt),
-            router_ids[:nadd],
-            router_ids[nadd:],
-        )
-        self.reachable_routers |= set(router_ids[:nadd])
-        self.reachable_routers -= set(router_ids[nadd:])
-        logging.info("RECV: %s new set %s", api_msgname(mt), self.reachable_routers)
-
-        if self.reachable_change_cb:
-            logging.info("RECV: %s calling callback", api_msgname(mt))
-            await self.reachable_change_cb(router_ids[:nadd], router_ids[nadd:])
 
     async def _router_id_msg(self, mt, msg, extra, router_id):
         router_id = ip(router_id)
@@ -818,187 +536,6 @@ class OspfOpaqueClient(OspfApiClient):
         if self.router_id_change_cb:
             logging.info("RECV: %s calling callback", api_msgname(mt))
             await self.router_id_change_cb(router_id, old_router_id)
-
-    async def add_opaque_data(self, addr, lsa_type, otype, oid, data):
-        """Add an instance of opaque data.
-
-        Add an instance of opaque data. This call will register for the given
-        LSA and opaque type if not already done.
-
-        Args:
-            addr: depends on lsa_type, LINK => ifaddr, AREA => area ID, AS => ignored
-            lsa_type: LSA_TYPE_OPAQUE_{LINK,AREA,AS}
-            otype: (octet) opaque type
-            oid: (3 octets) ID of this opaque data
-            data: the opaque data
-        Raises:
-            See `msg_send_raises`
-        """
-        assert self.ready_cond.get(lsa_type, {}).get(otype) is True, "Not Registered!"
-
-        if lsa_type == LSA_TYPE_OPAQUE_LINK:
-            ifaddr, aid = int(addr), 0
-        elif lsa_type == LSA_TYPE_OPAQUE_AREA:
-            ifaddr, aid = 0, int(addr)
-        else:
-            assert lsa_type == LSA_TYPE_OPAQUE_AS
-            ifaddr, aid = 0, 0
-
-        mt = MSG_ORIGINATE_REQUEST
-        msg = struct.pack(
-            msg_fmt[mt],
-            ifaddr,
-            aid,
-            *OspfOpaqueClient._opaque_args(lsa_type, otype, oid, data),
-        )
-        msg += data
-        await self.msg_send_raises(mt, msg)
-
-    async def delete_opaque_data(self, addr, lsa_type, otype, oid, flags=0):
-        """Delete an instance of opaque data.
-
-        Delete an instance of opaque data. This call will register for the given
-        LSA and opaque type if not already done.
-
-        Args:
-            addr: depends on lsa_type, LINK => ifaddr, AREA => area ID, AS => ignored
-            lsa_type: LSA_TYPE_OPAQUE_{LINK,AREA,AS}
-            otype: (octet) opaque type.
-            oid: (3 octets) ID of this opaque data
-            flags: (octet) optional flags (e.g., OSPF_API_DEL_ZERO_LEN_LSA, defaults to no flags)
-        Raises:
-            See `msg_send_raises`
-        """
-        assert self.ready_cond.get(lsa_type, {}).get(otype) is True, "Not Registered!"
-
-        mt = MSG_DELETE_REQUEST
-        mp = struct.pack(msg_fmt[mt], int(addr), lsa_type, otype, flags, oid)
-        await self.msg_send_raises(mt, mp)
-
-    async def is_registered(self, lsa_type, otype):
-        """Determine if an (lsa_type, otype) tuple has been registered with FRR
-
-        This determines if the type has been registered, but not necessarily if it is
-        ready, if that is required use the `wait_opaque_ready` metheod.
-
-        Args:
-            lsa_type: LSA_TYPE_OPAQUE_{LINK,AREA,AS}
-            otype: (octet) opaque type.
-        """
-        async with self.ready_lock:
-            return self.ready_cond.get(lsa_type, {}).get(otype) is not None
-
-    async def register_opaque_data(self, lsa_type, otype, callback=None):
-        """Register intent to advertise opaque data.
-
-        The application should wait for the async notificaiton that the server is
-        ready to advertise the given opaque data type. The API currently only allows
-        a single "owner" of each unique (lsa_type,otype). To wait call `wait_opaque_ready`
-
-        Args:
-            lsa_type: LSA_TYPE_OPAQUE_{LINK,AREA,AS}
-            otype: (octet) opaque type.
-            callback: if given, callback will be called when changes are received for
-                LSA of the given (lsa_type, otype). The callbacks signature is:
-
-                `callback(msg_type, ifaddr, area_id, lsa_header, data, lsa)`
-
-                Args:
-                    msg_type: MSG_LSA_UPDATE_NOTIFY or MSG_LSA_DELETE_NOTIFY
-                    ifaddr: integer identifying an interface (by IP address)
-                    area_id: integer identifying an area
-                    lsa_header: the LSA header as an unpacked tuple (fmt: ">HBBIILHH")
-                    data: the opaque data that follows the LSA header
-                    lsa: the octets of the full lsa
-        Raises:
-            See `msg_send_raises`
-        """
-        assert not await self.is_registered(
-            lsa_type, otype
-        ), "Registering registered type"
-
-        if callback:
-            self.opaque_change_cb[(lsa_type, otype)] = callback
-        elif (lsa_type, otype) in self.opaque_change_cb:
-            logging.warning(
-                "OSPFCLIENT: register: removing callback for %s opaque-type %s",
-                lsa_typename(lsa_type),
-                otype,
-            )
-            del self.opaque_change_cb[(lsa_type, otype)]
-
-        await self._register_opaque_data(lsa_type, otype)
-
-    async def wait_opaque_ready(self, lsa_type, otype):
-        async with self.ready_lock:
-            cond = self.ready_cond[lsa_type].get(otype)
-            if cond is True:
-                return
-
-            assert self.wait_ready
-
-            logging.debug(
-                "waiting for ready %s opaque-type %s", lsa_typename(lsa_type), otype
-            )
-
-            if not cond:
-                cond = self.ready_cond[lsa_type][otype] = []
-
-            evt = Event()
-            cond.append(evt)
-
-        await evt.wait()
-        logging.debug("READY for %s opaque-type %s", lsa_typename(lsa_type), otype)
-
-    async def register_opaque_data_wait(self, lsa_type, otype, callback=None):
-        """Register intent to advertise opaque data and wait for ready.
-
-        The API currently only allows a single "owner" of each unique (lsa_type,otype).
-
-        Args:
-            lsa_type: LSA_TYPE_OPAQUE_{LINK,AREA,AS}
-            otype: (octet) opaque type.
-            callback: if given, callback will be called when changes are received for
-                LSA of the given (lsa_type, otype). The callbacks signature is:
-
-                `callback(msg_type, ifaddr, area_id, lsa_header, data, lsa)`
-
-                Args:
-                    msg_type: MSG_LSA_UPDATE_NOTIFY or MSG_LSA_DELETE_NOTIFY
-                    ifaddr: integer identifying an interface (by IP address)
-                    area_id: integer identifying an area
-                    lsa_header: the LSA header as an unpacked tuple (fmt: ">HBBIILHH")
-                    data: the opaque data that follows the LSA header
-                    lsa: the octets of the full lsa
-        Raises:
-
-            See `msg_send_raises`
-        """
-        await self.register_opaque_data(lsa_type, otype, callback)
-        await self.wait_opaque_ready(lsa_type, otype)
-
-    async def unregister_opaque_data(self, lsa_type, otype):
-        """Unregister intent to advertise opaque data.
-
-        This will also cause the server to flush/delete all opaque data of
-        the given (lsa_type,otype).
-
-        Args:
-            lsa_type: LSA_TYPE_OPAQUE_{LINK,AREA,AS}
-            otype: (octet) opaque type.
-        Raises:
-            See `msg_send_raises`
-        """
-        assert await self.is_registered(
-            lsa_type, otype
-        ), "Unregistering unregistered type"
-
-        if (lsa_type, otype) in self.opaque_change_cb:
-            del self.opaque_change_cb[(lsa_type, otype)]
-
-        mt = MSG_UNREGISTER_OPAQUETYPE
-        mp = struct.pack(msg_fmt[mt], lsa_type, otype)
-        await self.msg_send_raises(mt, mp)
 
     async def monitor_lsa(self, callback=None):
         """Monitor changes to LSAs.
@@ -1020,60 +557,6 @@ class OspfOpaqueClient(OspfApiClient):
         self.lsa_change_cb = callback
         await self.req_lsdb_sync()
 
-    async def monitor_reachable(self, callback=None):
-        """Monitor the set of reachable routers.
-
-        The property `reachable_routers` contains the set() of reachable router IDs
-        as integers. This set is updated prior to calling the `callback`
-
-        Args:
-            callback: callback will be called when the set of reachable
-                routers changes. The callback signature is:
-
-                `callback(added, removed)`
-
-                Args:
-                    added: list of integer router IDs being added
-                    removed: list of integer router IDs being removed
-        """
-        self.reachable_change_cb = callback
-        await self.req_reachable_routers()
-
-    async def monitor_ism(self, callback=None):
-        """Monitor the state of OSPF enabled interfaces.
-
-        Args:
-            callback: callback will be called when an interface changes state.
-                The callback signature is:
-
-                `callback(ifaddr, area_id, state)`
-
-                Args:
-                    ifaddr: integer identifying an interface (by IP address)
-                    area_id: integer identifying an area
-                    state: ISM_*
-        """
-        self.ism_change_cb = callback
-        await self.req_ism_states()
-
-    async def monitor_nsm(self, callback=None):
-        """Monitor the state of OSPF neighbors.
-
-        Args:
-            callback: callback will be called when a neighbor changes state.
-                The callback signature is:
-
-                `callback(ifaddr, nbr_addr, router_id, state)`
-
-                Args:
-                    ifaddr: integer identifying an interface (by IP address)
-                    nbr_addr: integer identifying neighbor by IP address
-                    router_id: integer identifying neighbor router ID
-                    state: NSM_*
-        """
-        self.nsm_change_cb = callback
-        await self.req_nsm_states()
-
     async def monitor_router_id(self, callback=None):
         """Monitor the OSPF router ID.
 
@@ -1094,39 +577,19 @@ class OspfOpaqueClient(OspfApiClient):
         await self.req_router_id_sync()
 
 
-# ================
-# CLI/Script Usage
-# ================
-def next_action(action_list=None):
-    "Get next action from list or STDIN"
-    if action_list:
-        for action in action_list:
-            yield action
-    else:
-        while True:
-            action = input("")
-            if not action:
-                break
-            yield action.strip()
-
-
 def print_event(event: Dict):
     print(json.dumps(event))
 
 
 async def async_main(args):
-    c = OspfOpaqueClient(args.server)
+    c = OspfLSDBClient(args.server)
     await c.connect()
 
     lsdb = LSDB()
     lsdb.add_event_listener(print_event)
 
     try:
-        # Start handling async messages from server.
-        if sys.version_info[1] > 6:
-            asyncio.create_task(c._handle_msg_loop())
-        else:
-            asyncio.get_event_loop().create_task(c._handle_msg_loop())
+        asyncio.create_task(c._handle_msg_loop())
 
         async def trigger_and_unhook(*args):
             logging.warning("LSDB loaded!")
@@ -1159,11 +622,6 @@ def main(*args):
     ap.add_argument("--exit", action="store_true", help="Exit after commands")
     ap.add_argument("--server", default="localhost", help="OSPF API server")
     ap.add_argument("-v", "--verbose", action="store_true", help="be verbose")
-    ap.add_argument(
-        "actions",
-        nargs="*",
-        help="WAIT,SEC|(ADD|DEL),LSATYPE,[ADDR,],OTYPE,OID,[HEXDATA|DEL_FLAG]",
-    )
     args = ap.parse_args()
 
     level = logging.DEBUG if args.verbose else logging.WARNING
@@ -1178,15 +636,7 @@ def main(*args):
 
     status = 3
     try:
-        if sys.version_info[1] > 6:
-            # python >= 3.7
-            status = asyncio.run(async_main(args))
-        else:
-            loop = asyncio.get_event_loop()
-            try:
-                status = loop.run_until_complete(async_main(args))
-            finally:
-                loop.close()
+        status = asyncio.run(async_main(args))
     except KeyboardInterrupt:
         logging.info("Exiting, received KeyboardInterrupt in main")
     except Exception as error:
