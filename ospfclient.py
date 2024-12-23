@@ -609,6 +609,15 @@ async def async_main(args):
         # in the sync queue so that we know when the initial load has completed, and we can start
         # streaming the diff to our consumers
         await c.monitor_router_id(trigger_and_unhook)
+
+        async def wait_for_lsdb_load():
+            while lsdb.initial_load_active:
+                await asyncio.sleep(0.2)
+
+        await wait_for_lsdb_load()
+
+        # Once the LSDB is loaded, Initiate the async websockets server in the background
+        asyncio.create_task(run_websocket_server())
     except Exception as error:
         logging.error("async_main: unexpected error: %s", error, exc_info=True)
         return 2
@@ -639,9 +648,6 @@ def main(*args):
     )
 
     logging.info("ospfclient: starting")
-
-    # Initiate the async websockets server in the background
-    run_websocket_server()
 
     status = 3
     try:
