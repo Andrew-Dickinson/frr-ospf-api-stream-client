@@ -19,6 +19,7 @@ from asyncio import Lock
 from ipaddress import ip_address as ip
 from typing import Dict
 
+from archival import archive_event_message
 from lsdb import LSDB
 from websockets_server import LSDBStreamProtocol, run_websocket_server
 
@@ -593,6 +594,7 @@ async def async_main(args):
     lsdb = LSDB()
     lsdb.add_event_listener(print_event)
     lsdb.add_event_listener(ws_broadcast_event)
+    lsdb.add_event_listener(archive_event_message)
 
     try:
         asyncio.create_task(c._handle_msg_loop())
