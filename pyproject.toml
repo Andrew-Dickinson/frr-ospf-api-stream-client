@@ -6,7 +6,7 @@ description = "Stateful pure-python API client for the FRR OSPF API to generate 
 readme = "readme.md"
 license = { file = "license.txt" }
 classifiers = [
-    "OSI Approved :: GNU General Public License v2 (GPLv2)",
+    "License :: OSI Approved :: GNU Lesser General Public License v2 (LGPLv2)",
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent"
 ]
