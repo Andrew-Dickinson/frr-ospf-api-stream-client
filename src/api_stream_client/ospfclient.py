@@ -582,9 +582,9 @@ class OspfLSDBClient(OspfApiClient):
         await self.req_router_id_sync()
 
 
-def write_db_snapshot_loop(lsdb: LSDB):
+def write_db_snapshot_loop(lsdb: LSDB, path_prefix: str):
     db_snapshot = lsdb.to_api_dict()
-    archive_db_snapshot(db_snapshot)
+    archive_db_snapshot(db_snapshot, path_prefix)
     logging.info("Wrote DB snapshot due to heartbeat")
 
 
@@ -606,9 +606,13 @@ async def async_main(args):
     def ws_broadcast_event(event: Dict):
         LSDBStreamProtocol.broadcast(json.dumps(event))
 
-    lsdb.add_event_listener(print_event)
-    lsdb.add_event_listener(ws_broadcast_event)
-    lsdb.add_event_listener(archive_event_message)
+    if not args.mute_stdout_stream:
+        lsdb.add_event_listener(print_event)
+
+    if args.events_path_prefix:
+        lsdb.add_event_listener(
+            partial(archive_event_message, path_prefix=args.events_path_prefix)
+        )
 
     try:
         asyncio.create_task(c._handle_msg_loop())
@@ -633,11 +637,18 @@ async def async_main(args):
         await wait_for_lsdb_load()
 
         # Once the LSDB is loaded, Initiate the async websockets server in the background
-        asyncio.create_task(run_websocket_server())
+        if args.ws_listen:
+            asyncio.create_task(run_websocket_server(args.ws_listen))
+            lsdb.add_event_listener(ws_broadcast_event)
 
         # Also start up an async task to write out api.andrew.mesh API payloads
-        scheduler = initialize_scheduler()
-        scheduler.add_job(partial(write_db_snapshot_loop, lsdb), "cron", minute="*")
+        if args.snapshots_path_prefix:
+            scheduler = initialize_scheduler()
+            scheduler.add_job(
+                partial(write_db_snapshot_loop, lsdb, args.snapshots_path_prefix),
+                "cron",
+                minute="*",
+            )
     except Exception as error:
         logging.error("async_main: unexpected error: %s", error, exc_info=True)
         return 2
@@ -653,18 +664,29 @@ async def async_main(args):
 
 def main(*args):
     ap = argparse.ArgumentParser(args)
-    ap.add_argument("--logtag", default="CLIENT", help="tag to identify log messages")
-    ap.add_argument("--exit", action="store_true", help="Exit after commands")
     ap.add_argument("--server", default="localhost", help="OSPF API server")
+    ap.add_argument(
+        "--ws-listen", help="Interface and port to listen for websockets sessions on"
+    )
+    ap.add_argument(
+        "--events-path-prefix", help="File path prefix for events JSONL output files"
+    )
+    ap.add_argument(
+        "--snapshots-path-prefix",
+        help="File path prefix for LSDB snapshot JSON output files",
+    )
+    ap.add_argument(
+        "--mute-stdout-stream",
+        action="store_true",
+        help="Pass to disable the event stream in stdout",
+    )
     ap.add_argument("-v", "--verbose", action="store_true", help="be verbose")
     args = ap.parse_args()
 
     level = logging.DEBUG if args.verbose else logging.WARNING
     logging.basicConfig(
         level=level,
-        format="%(asctime)s %(levelname)s: {}: %(name)s %(message)s".format(
-            args.logtag
-        ),
+        format="%(asctime)s %(levelname)s: %(name)s %(message)s",
     )
 
     logging.info("ospfclient: starting")

@@ -26,10 +26,11 @@ class LSDBStreamProtocol(WebSocketServerProtocol):
                 session.sendMessage(message.encode("UTF8"), isBinary=False)
 
 
-async def run_websocket_server():
+async def run_websocket_server(host_port: str):
     factory = WebSocketServerFactory()
     factory.protocol = LSDBStreamProtocol
 
     loop = asyncio.get_event_loop()
-    coro = loop.create_server(factory, "0.0.0.0", 9000)
+    host, port_str = host_port.split(":")
+    coro = loop.create_server(factory, host, int(port_str))
     await coro
