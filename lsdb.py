@@ -318,10 +318,10 @@ class RouterLSA(LSA):
         return links
 
     def to_dict(self) -> Dict[str, Any]:
-        links_json = defaultdict(set)
+        links_json = defaultdict(list)
         for link in self.links:
             if link.type == 1:
-                links_json["router"].add(
+                links_json["router"].append(
                     frozendict({"id": link.id__as_ip, "metric": link.metric})
                 )
             elif link.type == 2:
@@ -340,7 +340,7 @@ class RouterLSA(LSA):
                 network_cidr = addr_and_mask_to_cidr(
                     network_lsa.ls_id, network_lsa.network_mask
                 )
-                links_json["network"].add(
+                links_json["network"].append(
                     frozendict(
                         {
                             "id": network_cidr,
@@ -350,7 +350,7 @@ class RouterLSA(LSA):
                     )
                 )
             elif link.type == 3:
-                links_json["stubnet"].add(
+                links_json["stubnet"].append(
                     frozendict(
                         {
                             "id": addr_and_mask_to_cidr(link.id, link.data),
@@ -370,8 +370,8 @@ class RouterLSA(LSA):
         old: Optional["RouterLSA"], new: Optional["RouterLSA"]
     ) -> List[Dict[str, Any]]:
         try:
-            old_routes: Dict[str, set] = old.to_dict() if old else {}
-            new_routes: Dict[str, set] = new.to_dict() if new else {}
+            old_routes: Dict[str, list] = old.to_dict() if old else {}
+            new_routes: Dict[str, list] = new.to_dict() if new else {}
         except ValueError:
             # LSDB not yet filled case for network links
             return []
@@ -381,15 +381,15 @@ class RouterLSA(LSA):
         route_types = set(old_routes.keys()) | set(new_routes.keys())
         for route_type in route_types:
             if route_type not in old_routes:
-                old_routes[route_type] = set()
+                old_routes[route_type] = []
             if route_type not in new_routes:
-                new_routes[route_type] = set()
+                new_routes[route_type] = []
 
         lsa = new if new else old
 
         for route_type in route_types:
-            old_links = old_routes[route_type]
-            new_links = new_routes[route_type]
+            old_links = set(old_routes[route_type])
+            new_links = set(new_routes[route_type])
 
             removed_links = old_links - new_links
             added_links = new_links - old_links
@@ -455,15 +455,15 @@ class NetworkLSA(LSA):
     def to_dict(self) -> Dict[str, Any]:
         return {
             "dr": self.ls_advertising_router__as_ip,
-            "routers": {router.id__as_ip for router in self.routers},
+            "routers": [router.id__as_ip for router in self.routers],
         }
 
     @staticmethod
     def _diff_list(
         old: Optional["NetworkLSA"], new: Optional["NetworkLSA"]
     ) -> List[Dict[str, Any]]:
-        old_routers: set = old.to_dict()["routers"] if old else set()
-        new_routers: set = new.to_dict()["routers"] if new else set()
+        old_routers: set = set(old.to_dict()["routers"]) if old else set()
+        new_routers: set = set(new.to_dict()["routers"]) if new else set()
 
         output = []
 
@@ -638,7 +638,7 @@ class LSDB:
     @property
     def dr_map(self):
         dr_to_lsa_map: Dict[str, LSA] = {}
-        for lsa, _ in self.lsa_dict.values():
+        for lsa, _, _ in self.lsa_dict.values():
             if lsa.ls_type == LSA_TYPE_NETWORK:
                 dr_to_lsa_map[lsa.ls_id__as_ip] = lsa
 
@@ -646,18 +646,18 @@ class LSDB:
 
     def to_api_dict(self) -> Dict[str, Any]:
         networks = {}
-        routers = defaultdict(lambda: {"links": defaultdict(set)})
+        routers = defaultdict(lambda: {"links": defaultdict(list)})
 
-        for lsa, _ in self.lsa_dict.values():
+        for lsa, _, _ in self.lsa_dict.values():
             if lsa.ls_type == LSA_TYPE_NETWORK:
                 networks[lsa.internal_entity_id] = lsa.to_dict()
 
-        for lsa, _ in self.lsa_dict.values():
+        for lsa, _, _ in self.lsa_dict.values():
             if lsa.ls_type == LSA_TYPE_ROUTER:
                 routers[lsa.internal_entity_id]["links"] |= lsa.to_dict()
             elif lsa.ls_type == LSA_TYPE_AS_EXTERNAL:
-                routers[lsa.internal_entity_id]["links"]["external"].add(
-                    frozendict(lsa.to_dict())
+                routers[lsa.internal_entity_id]["links"]["external"].append(
+                    lsa.to_dict()
                 )
 
         return {
