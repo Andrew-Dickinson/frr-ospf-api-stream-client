@@ -696,6 +696,8 @@ class LSDB:
         lsa = LSA.construct_lsa(lsa_header, lsa_data)
         existing_db_copy, last_write, delete_bit = self.get_lsa(lsa)
 
+        from api_stream_client.ospfclient import MSG_LSA_DELETE_NOTIFY
+
         if existing_db_copy and (
             msg_type == MSG_LSA_DELETE_NOTIFY or lsa.ls_age == LSA_MAX_AGE
         ):
@@ -722,6 +724,3 @@ class LSDB:
                 output = lsa.diff_list(None, lsa)
                 for line in output:
                     self.publish_change_event(line, lsa_publish_time)
-
-
-from ospfclient import MSG_LSA_DELETE_NOTIFY
