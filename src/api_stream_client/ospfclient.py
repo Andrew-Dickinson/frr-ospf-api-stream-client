@@ -22,9 +22,9 @@ from typing import Dict
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from archival import archive_event_message, archive_db_snapshot
-from lsdb import LSDB
-from websockets_server import LSDBStreamProtocol, run_websocket_server
+from api_stream_client.archival import archive_event_message, archive_db_snapshot
+from api_stream_client.lsdb import LSDB
+from api_stream_client.websockets_server import LSDBStreamProtocol, run_websocket_server
 
 FMT_APIMSGHDR = ">BBHL"
 FMT_APIMSGHDR_SIZE = struct.calcsize(FMT_APIMSGHDR)
