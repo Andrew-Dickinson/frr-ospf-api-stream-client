@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NYC Mesh Live OSPF Change Event Feed</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            color: #333;
+            display: flex;
+            flex-direction: row;
+        }
+        #feed {
+            height: 100vh;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            background: #fff;
+            padding: 10px;
+            /*box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);*/
+            flex: 1;
+        }
+        .event {
+            margin-bottom: 10px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background: #f9f9f9;
+            display: flex;
+            flex-direction: column;
+        }
+        .event.added {
+            border-left: 5px solid #4caf50;
+            background: #e8f5e9;
+        }
+        .event.removed {
+            border-left: 5px solid #f44336;
+            background: #fdecea;
+        }
+        .header {
+            font-weight: bold;
+            font-size: 1.1em;
+            margin-bottom: 5px;
+        }
+        .timestamp {
+            font-size: 0.9em;
+            margin-top: 0.4em;
+            color: #666;
+        }
+        .json {
+            font-size: 0.5em;
+            margin-top: 0.4em;
+            color: #a8a8a8;
+        }
+        #sidebar {
+            height: 100vh;
+            overflow-y: auto;
+            flex: 1;
+            padding: 10px;
+            padding-left: 20px;
+            border-right: 1px solid #ccc;
+            background-color: #f4f4f9;
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.1);
+        }
+        table {
+            border-collapse: collapse;
+            margin: 10px;
+            display: inline-block;
+            vertical-align: top;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: center;
+        }
+        th {
+            background-color: #f4f4f4;
+        }
+        tr{
+            background: white;
+        }
+        #total-events {
+            font-size: 2em;
+            font-weight: bold;
+        }
+        .event-info {
+            font-size: 1.2em;
+        }
+        .event-info > p {
+            margin: 0;
+            padding: 0;
+        }
+        h1 {
+            margin: 0;
+        }
+        .container {
+            display: flex;
+            justify-content: space-between;
+        }
+        .container > div {
+            width: 48%;
+        }
+
+        .spinner {
+            border: 8px solid #979797;
+            border-top: 8px solid #333;;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 2s linear infinite;
+            /*position: absolute;*/
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .loading {
+            width: 100%;
+            height: 40vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            /*position: absolute;*/
+            top: 0;
+            left: 0;
+            /*background-color: rgba(255, 255, 255, 1);*/
+            border-radius: 10px;
+        }
+
+        .loading-text {
+            margin-left: 30px;
+            /*color: #a8a8a8;*/
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="sidebar">
+        <h1>NYC Mesh Live OSPF Event Feed</h1>
+
+        <hr/>
+
+        <p>
+            This feed shows every single update to the NYC Mesh network in realtime as they occur.
+            We pull these events directly from the <a href="https://en.wikipedia.org/wiki/Link-state_advertisement">OSPF LSA</a>
+            objects, via the <a href="https://docs.frrouting.org/projects/dev-guide/en/latest/ospf-api.html">FRR OSPF API</a>.
+            A <a href="https://en.wikipedia.org/wiki/WebSocket">websockets</a> connection vends live updates to your browser.
+        </p>
+        <p>
+            This event feed is available as a raw stream via <pre>wss://api.andrew.mesh.nycmesh.net/api/v2/ospf-event-stream/ws</pre>
+            alternatively, 7 days of historical event data can be found at
+            <a href="https://api.andrew.mesh.nycmesh.net/api/v2/ospf-event-stream/history/"><pre>https://api.andrew.mesh.nycmesh.net/api/v2/ospf-event-stream/history/</pre></a>
+        </p>
+        <p>
+            For non-event-based snapshots of the overall state of the mesh, see
+            <a href="https://api.andrew.mesh.nycmesh.net/api/v2/ospf/history/"><pre>https://api.andrew.mesh.nycmesh.net/api/v2/ospf/history/</pre></a>
+        </p>
+
+        <hr/>
+
+        <div class="loading" id="loading-spinner">
+            <div class="spinner"></div>
+            <div class="loading-text">Loading stats</div>
+        </div>
+        <div id="stats" class="hidden">
+            <div class="event-info">
+                <p>Total Events (last hour)</p>
+                <span id="total-events">0</span>
+                <p>avg. <span id="per-second">0</span> per second</p>
+            </div>
+            <div class="container">
+                <div>
+                    <h2>Flappiest Nodes</h2>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Node</th>
+                                <th>Event Count</th>
+                            </tr>
+                        </thead>
+                        <tbody id="flappiest-routers"></tbody>
+                    </table>
+                </div>
+                <div>
+                    <h2>Flappiest Links</h2>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Link</th>
+                                <th>Event Count</th>
+                            </tr>
+                        </thead>
+                        <tbody id="flappiest-links"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="feed"></div>
+
+    <script>
+        const feed = document.getElementById('feed');
+        const socketUrl = 'wss://api.andrew.mesh.nycmesh.net/api/v2/ospf-event-stream/ws';
+        const socket = new WebSocket(socketUrl);
+        let eventPile = [];
+
+        function convertIPToNN(ip_addr){
+            if (!ip_addr.startsWith("10.69.")) {
+                return ip_addr
+            }
+
+            const components = ip_addr.slice(6).split('.').map(x => parseInt(x));
+            return `NN${components[0] * 100 + (components[1] % 100)}`
+
+        }
+
+        socket.onopen = () => {
+            console.log('WebSocket connection established.');
+        };
+
+        socket.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            eventPile.push(data);
+            const { timestamp, entity, added, removed } = data;
+
+            // Create a human-readable timestamp
+            const eventTime = new Date(timestamp);
+            // const relativeTime = ((timestamp - connectionStartTime) / 1000).toFixed(1);
+            const readableTimestamp = eventTime.toLocaleString();
+
+            // Determine the event type and build the description
+            let description = '';
+            let eventClass = '';
+            let header = '';
+
+            if (added) {
+                description = `Connected`;
+                eventClass = 'added';
+            }
+            if (removed) {
+                description = `Disconnected`;
+                eventClass = 'removed';
+            }
+
+            let subject = added ? added : removed;
+            if (entity.type === "network") {
+                header = `${entity.id} <-> ${convertIPToNN(subject.router)}`;
+            } else if (entity.type === "router") {
+                if (subject.link.router) {
+                    header = `${convertIPToNN(entity.id)} <-> ${convertIPToNN(subject.link.router.id)}`;
+                    description = description + ` (Cost ${subject.link.router.metric})`
+                } else if (subject.link.network) {
+                    header = `${convertIPToNN(entity.id)} <-> ${subject.link.network.id}`;
+                    description = description + ` (Cost ${subject.link.network.metric})`
+                } else if (subject.link.stubnet) {
+                    header = `${convertIPToNN(entity.id)} <-> ${subject.link.stubnet.id}`;
+                    description = description + ` (Cost ${subject.link.stubnet.metric})`
+                } else if (subject.link.external) {
+                    header = `${convertIPToNN(entity.id)} <-> ${subject.link.external.id}`;
+                    if (subject.link.external.metric) {
+                        description = description + ` (Cost ${subject.link.external.metric})`
+                    } else {
+                        description = description + ` (Cost ${subject.link.external.metric2} - Type 2)`
+                    }
+               }
+            }
+
+            // Create a new event element
+            const eventElement = document.createElement('div');
+            eventElement.className = `event ${eventClass}`;
+            eventElement.innerHTML = `
+                <div class="header">${header}</div>
+                <div>${description}</div>
+                <div class="timestamp">${readableTimestamp}</div>
+                <div class="json">${event.data}</div>
+            `;
+
+            // Add the event to the feed at the top
+            feed.insertBefore(eventElement, feed.firstChild);
+        };
+
+        socket.onerror = (error) => {
+            console.error('WebSocket error:', error);
+        };
+
+        socket.onclose = () => {
+            console.log('WebSocket connection closed.');
+        };
+
+        async function fetchData(time) {
+            const year = time.getUTCFullYear();
+            const month = String(time.getUTCMonth() + 1).padStart(2, '0');
+            const day = String(time.getUTCDate()).padStart(2, '0');
+            const hour = String(time.getUTCHours()).padStart(2, '0');
+
+            const url = `https://api.andrew.mesh.nycmesh.net/api/v2/ospf-event-stream/history/${year}/${month}/${day}/${hour}.jsonl`;
+            const response = await fetch(url);
+            const text = await response.text();
+            return text.split('\n').filter(line => line).map(line => JSON.parse(line));
+        }
+
+        function summarizeEvents(events) {
+            const routerCounts = {};
+            const linkCounts = {};
+
+            events.forEach(event => {
+                if (event.entity.type === "router") {
+                    const routerId = event.entity.id;
+                    routerCounts[routerId] = (routerCounts[routerId] || 0) + 1;
+
+                    const link = event.added?.link || event.removed?.link;
+                    if (link.router) {
+                        const linkKey = [routerId, link.router.id].sort().join("<>");
+                        linkCounts[linkKey] = (linkCounts[linkKey] || 0) + 1;
+                    }
+                }
+            });
+
+            return { routerCounts, linkCounts, totalEvents: events.length };
+        }
+
+        function updateUI(summary) {
+            document.getElementById('total-events').textContent = summary.totalEvents;
+            document.getElementById('per-second').textContent = (summary.totalEvents / 3600).toFixed(1);
+
+            const routerTable = document.getElementById('flappiest-routers');
+            routerTable.innerHTML = Object.entries(summary.routerCounts)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 10)
+                .map(([id, count]) => `<tr><td>${convertIPToNN(id)}</td><td>${count}</td></tr>`)
+                .join('');
+
+            const linkTable = document.getElementById('flappiest-links');
+            linkTable.innerHTML = Object.entries(summary.linkCounts)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 10)
+                .map(([linkStr, count]) => {
+                    const link = linkStr.split("<>")
+                    return `<tr><td>${convertIPToNN(link[0])} <-> ${convertIPToNN(link[1])}</td><td>${count}</td></tr>`
+                })
+                .join('');
+        }
+
+        async function pruneOldData(){
+            const hour_ago = new Date(new Date().getTime() - 60 * 60 * 1000);
+            eventPile = eventPile.filter((event) => event.timestamp > hour_ago.getTime());
+
+            const eventDivs = feed.children;
+            for (let i = 1000; i < eventDivs.length; i++) {
+                feed.removeChild(eventDivs[eventDivs.length - 1]);
+            }
+        }
+
+        async function init() {
+            try {
+                // Show loading spinner
+                document.getElementById('loading-spinner').classList.remove('hidden');
+                document.getElementById('stats').classList.add('hidden');
+
+                const now = new Date();
+                const hour_ago = new Date(now.getTime() - 60 * 60 * 1000);
+                const events_pair = await Promise.all([fetchData(hour_ago), fetchData(now)]);
+                const lastTwoHours = events_pair[0].concat(events_pair[1])
+
+                eventPile.push(...lastTwoHours.filter((event) => event.timestamp > hour_ago.getTime()))
+                updateUI(summarizeEvents(eventPile));
+
+                // Hide loading spinner and show content
+                document.getElementById('loading-spinner').classList.add('hidden');
+                document.getElementById('stats').classList.remove('hidden');
+            } catch (error) {
+                console.error('Error fetching or processing data:', error);
+            }
+
+            setInterval(function() {
+                pruneOldData();
+                updateUI(summarizeEvents(eventPile));
+            }, 5000);
+        }
+
+        init();
+    </script>
+</body>
+</html>
